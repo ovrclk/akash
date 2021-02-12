@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/ovrclk/akash/cmd/common"
 	"sync"
 
 	"github.com/cosmos/cosmos-sdk/client"
@@ -21,6 +23,7 @@ type DeploymentData struct {
 	OrderID      []mtypes.OrderID
 	LeaseID      []mtypes.LeaseID
 	Version      []byte
+	Deposit sdk.Coin
 
 	sync.RWMutex
 }
@@ -32,7 +35,9 @@ func (dd *DeploymentData) MsgCreate() *dtypes.MsgCreateDeployment {
 		ID:      dd.DeploymentID,
 		Groups:  make([]dtypes.GroupSpec, 0, len(dd.Groups)),
 		Version: dd.Version,
+		Deposit: dd.Deposit,
 	}
+
 
 	// Append the groups to the message
 	for _, group := range dd.Groups {
@@ -121,6 +126,11 @@ func NewDeploymentData(filename string, flags *pflag.FlagSet, clientCtx client.C
 			return nil, err
 		}
 	}
+
+	deposit, err := common.DepositFromFlags(flags)
+	if err != nil {
+		return nil, err
+	}
 	return &DeploymentData{
 		SDL:          sdlSpec,
 		Manifest:     mani,
@@ -129,5 +139,6 @@ func NewDeploymentData(filename string, flags *pflag.FlagSet, clientCtx client.C
 		OrderID:      make([]mtypes.OrderID, 0),
 		LeaseID:      make([]mtypes.LeaseID, 0),
 		Version:      ver,
+		Deposit: deposit,
 	}, nil
 }
