@@ -204,6 +204,8 @@ func (b *deploymentBuilder) create() (*appsv1.Deployment, error) { // nolint:gol
 	replicas := int32(b.service.Count)
 	falseValue := false
 
+	runtimeClassName := "gvisor"
+
 	kdeployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   b.name(),
@@ -219,6 +221,7 @@ func (b *deploymentBuilder) create() (*appsv1.Deployment, error) { // nolint:gol
 					Labels: b.labels(),
 				},
 				Spec: corev1.PodSpec{
+					RuntimeClassName: &runtimeClassName,
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &falseValue,
 					},
