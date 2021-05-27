@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sync"
@@ -136,7 +137,27 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 		leaseServiceStatusHandler(log, pclient.Cluster())).
 		Methods("GET")
 
+	// POST /lease/<lease-id>/shell
+	lrouter.HandleFunc("/shell",
+		leaseShellHandler(log, pclient.Cluster())).
+		Methods("POST")
+
 	return router
+}
+
+func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc {
+	return func (rw http.ResponseWriter, req *http.Request){
+		err := cclient.Shell(req.Context(), requestLeaseID(req))
+		if err == nil {
+			rw.WriteHeader(http.StatusOK)
+			return
+		}
+
+
+		log.Error(fmt.Sprintf("lease shell failed %T; %+v", err, err), "err", err.Error())
+		rw.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 }
 
 func createStatusHandler(log log.Logger, sclient provider.StatusClient) http.HandlerFunc {

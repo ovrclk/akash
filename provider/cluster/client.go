@@ -3,6 +3,7 @@ package cluster
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"math/rand"
 	"sync"
@@ -35,6 +36,7 @@ type Client interface {
 	TeardownLease(context.Context, mtypes.LeaseID) error
 	Deployments(context.Context) ([]ctypes.Deployment, error)
 	Inventory(context.Context) ([]ctypes.Node, error)
+    Shell(context.Context, mtypes.LeaseID) error
 }
 
 type node struct {
@@ -247,4 +249,8 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 				},
 			}),
 	}, nil
+}
+
+func (c *nullClient) Shell(context.Context, mtypes.LeaseID) error {
+	return errors.New("not implemented")
 }

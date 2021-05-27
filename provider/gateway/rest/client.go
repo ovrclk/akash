@@ -47,6 +47,7 @@ type Client interface {
 	LeaseEvents(ctx context.Context, id mtypes.LeaseID, services string, follow bool) (*LeaseKubeEvents, error)
 	LeaseLogs(ctx context.Context, id mtypes.LeaseID, services string, follow bool, tailLines int64) (*ServiceLogs, error)
 	ServiceStatus(ctx context.Context, id mtypes.LeaseID, service string) (*cltypes.ServiceStatus, error)
+	LeaseShell(ctx context.Context, id mtypes.LeaseID) error
 }
 
 type LeaseKubeEvent struct {
@@ -360,6 +361,34 @@ func (c *client) LeaseStatus(ctx context.Context, id mtypes.LeaseID) (*cltypes.L
 	}
 
 	return &obj, nil
+}
+
+func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID) error {
+	uri, err := makeURI(c.host, leaseShellPath(lID))
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", uri, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.hclient.Do(req)
+	if err != nil {
+		return err
+	}
+	responseBuf := &bytes.Buffer{}
+	_, err = io.Copy(responseBuf, resp.Body)
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if err != nil {
+		return err
+	}
+
+	return createClientResponseErrorIfNotOK(resp, responseBuf)
 }
 
 func (c *client) LeaseEvents(ctx context.Context, id mtypes.LeaseID, _ string, follow bool) (*LeaseKubeEvents, error) {

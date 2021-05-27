@@ -6,13 +6,14 @@ import (
 	metricsutils "github.com/ovrclk/akash/util/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"os"
 	"path"
 
 	"k8s.io/client-go/util/flowcontrol"
 
 	kubeErrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 
 	ctypes "github.com/ovrclk/akash/provider/cluster/types"
@@ -39,6 +40,10 @@ import (
 	"github.com/ovrclk/akash/provider/cluster"
 	"github.com/ovrclk/akash/types"
 	mtypes "github.com/ovrclk/akash/x/market/types"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 )
 
 var (
@@ -69,6 +74,7 @@ type client struct {
 	ns       string
 	settings Settings
 	log      log.Logger
+	kubeContentConfig *restclient.Config
 }
 
 // NewClient returns new Kubernetes Client instance with provided logger, host and ns. Returns error incase of failure
@@ -87,6 +93,7 @@ func newClientWithSettings(log log.Logger, ns string, settings Settings) (Client
 		return nil, errors.Wrap(err, "kube: error building config flags")
 	}
 	config.RateLimiter = flowcontrol.NewFakeAlwaysRateLimiter()
+
 	kc, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		return nil, errors.Wrap(err, "kube: error creating kubernetes client")
@@ -117,6 +124,7 @@ func newClientWithSettings(log log.Logger, ns string, settings Settings) (Client
 		metc:     metc,
 		ns:       ns,
 		log:      log.With("module", "provider-cluster-kube"),
+		kubeContentConfig: config,
 	}, nil
 
 }
@@ -872,4 +880,82 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) ([
 	}
 
 	return deployments.Items, nil
+}
+
+func (c *client) Shell(_ context.Context, leaseID mtypes.LeaseID) error {
+	/**
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
+
+	loadingRules.ExplicitPath = "/home/ericu/.kube/config" // TOOD - use the path from the params
+	overrides := &clientcmd.ConfigOverrides{ClusterDefaults: clientcmd.ClusterDefaults}
+
+	kubeClientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
+	config, err := kubeClientConfig.ClientConfig()
+	if err != nil {
+		return err
+	}
+	**/
+
+	namespace := lidNS(leaseID)
+	podName := "web-5546dd7644-6zpl6" // TODO - somehow need to look this up
+	subResource := "exec"
+	isRaw := false // set to true for a full terminal
+	cmd := []string{"/bin/sh"}
+	cmd = []string{"/bin/echo", "bananas"} // TODO - parameter
+	containerName := "web" // TODO - figure me out automatically
+
+	groupVersion := schema.GroupVersion{Group: "", Version: "v1"}
+	c.kubeContentConfig.GroupVersion = &groupVersion
+	//c.kubeContentConfig.ContentType = runtime.ContentTypeJSON
+	//c.kubeContentConfig.AcceptContentTypes = runtime.ContentTypeJSON
+
+
+	// Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
+	var scheme = runtime.NewScheme()
+
+	codecFactory := serializer.NewCodecFactory(scheme)
+	negotiatedSerializer := runtime.NegotiatedSerializer(codecFactory)
+	c.log.Debug("kube config", "host", c.kubeContentConfig.Host)
+	c.kubeContentConfig.NegotiatedSerializer = negotiatedSerializer
+
+
+	kubeRestClient, err := restclient.RESTClientFor(c.kubeContentConfig)
+	if err != nil {
+		return err
+	}
+	//kubeRestClient := c.kc.AppsV1().RESTClient()
+
+	c.log.Info("Opening container shell", "namespace", namespace, "pod", podName, "container", containerName)
+
+	req := kubeRestClient.Post().Resource("pods").Name(podName).Namespace(namespace).SubResource(subResource)
+
+	// ParameterCodec handles versioning of objects that are converted to query parameters.
+	var parameterCodec = runtime.NewParameterCodec(scheme)
+
+	req.VersionedParams(&corev1.PodExecOptions{
+		Container: containerName,
+		Command: cmd,
+		Stdin: false,
+		Stdout: true,
+		Stderr: true,
+		TTY: isRaw,
+	}, parameterCodec)
+
+	exec, err := remotecommand.NewSPDYExecutor(c.kubeContentConfig, "POST", req.URL())
+	if err != nil {
+		c.log.Error("spdy executor failed", "err", err)
+		return err
+	}
+
+	// This can be nil, its only used when the terminal size needs to be updated
+	var tsq remotecommand.TerminalSizeQueue
+
+	return exec.Stream(remotecommand.StreamOptions{
+		Stdin:             os.Stdin, // any reader
+		Stdout:            os.Stdout, // any writer
+		Stderr:            os.Stderr, // any writer
+		Tty:               false,
+		TerminalSizeQueue: tsq,
+	})
 }

@@ -5,11 +5,11 @@ bins: $(BINS)
 
 .PHONY: build
 build:
-	$(GO) build ./...
+	$(GO) build -a  ./...
 
 .PHONY: akash
 akash:
-	$(GO) build $(BUILD_FLAGS) ./cmd/akash
+	$(GO) build -a $(BUILD_FLAGS) ./cmd/akash
 
 .PHONY: akash_docgen
 akash_docgen:

@@ -45,6 +45,7 @@ require (
 	k8s.io/apimachinery v0.19.3
 	k8s.io/client-go v0.19.3
 	k8s.io/code-generator v0.19.3
+	k8s.io/kubectl v0.19.3
 	k8s.io/metrics v0.19.3
 	sigs.k8s.io/kind v0.10.0
 )
