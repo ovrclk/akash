@@ -49,7 +49,6 @@ type ExecResult interface {
 	ExitCode() int
 }
 
-
 var ErrExecNoServiceWithName = errors.New("No such service exists with that name")
 var ErrExecServiceNotRunning = errors.New("Service with that name is not running")
 var ErrCommandExecutionFailed = errors.New("Command execution failed")

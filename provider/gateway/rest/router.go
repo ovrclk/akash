@@ -195,6 +195,15 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			return
 		}
 
+		stdin := vars.Get("stdin")
+		if 0 == len(stdin) {
+			log.Error("missing parameter stdin")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		connectStdin := stdin == "1"
+
 		upgrader := websocket.Upgrader{
 			ReadBufferSize:  0,
 			WriteBufferSize: 0,
@@ -204,10 +213,34 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 		if err != nil {
 			// At this point the connection either has a response sent already
 			// or it has been closed
-
-			// TODO - log the error
-			log.Error("failed handshake: %v", err)
+			log.Error("failed handshake", "err", err)
 			return
+		}
+
+		var stdinPipeOut *io.PipeWriter
+		var stdinPipeIn *io.PipeReader
+		wg := &sync.WaitGroup{}
+		if connectStdin {
+			stdinPipeIn, stdinPipeOut = io.Pipe()
+
+			wg.Add(1)
+			go func () {
+				defer wg.Done()
+				for {
+					msgType, data, err := ws.ReadMessage()
+					if err != nil {
+						return
+					}
+
+					if msgType == websocket.BinaryMessage && len(data) > 1 && data[0] == 104 {
+						_, err := stdinPipeOut.Write(data[1:])
+						if err != nil {
+							return
+						}
+					}
+				}
+
+			}()
 		}
 
 		stdout := wsWriterWrapper{
@@ -222,7 +255,18 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			id: 101,
 		}
 
-		result, err := cclient.Exec(req.Context(), requestLeaseID(req), service, cmd, nil, stdout, stderr)
+		var stdinForExec io.Reader
+		if connectStdin {
+			stdinForExec = stdinPipeIn
+		}
+		result, err := cclient.Exec(req.Context(), requestLeaseID(req), service, cmd, stdinForExec, stdout, stderr)
+
+		if stdinPipeOut != nil {
+			_ = stdinPipeOut.Close()
+		}
+		if stdinPipeIn != nil {
+			_ = stdinPipeIn.Close()
+		}
 
 		responseData := struct{
 			ExitCode int `json:"exit_code,omitempty"`
@@ -250,7 +294,7 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 				responseData.Message = err.Error()
 			} else {
 				// Don't return errors like this to the client, they could contain information
-				// that shoudl not be let out
+				// that should not be let out
 				resultWriter.id = 103
 				encodeData = false
 
@@ -271,6 +315,7 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			log.Error("failed writing response to client after exec", "err", err)
 		}
 
+		wg.Wait()
 		return
 	}
 }

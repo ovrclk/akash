@@ -48,7 +48,10 @@ type Client interface {
 	LeaseEvents(ctx context.Context, id mtypes.LeaseID, services string, follow bool) (*LeaseKubeEvents, error)
 	LeaseLogs(ctx context.Context, id mtypes.LeaseID, services string, follow bool, tailLines int64) (*ServiceLogs, error)
 	ServiceStatus(ctx context.Context, id mtypes.LeaseID, service string) (*cltypes.ServiceStatus, error)
-	LeaseShell(ctx context.Context, id mtypes.LeaseID, service string, cmd []string) error
+	LeaseShell(ctx context.Context, id mtypes.LeaseID, service string, cmd []string,
+		stdin io.Reader,
+		stdout io.Writer,
+		stderr io.Writer) error
 }
 
 type LeaseKubeEvent struct {
@@ -364,7 +367,10 @@ func (c *client) LeaseStatus(ctx context.Context, id mtypes.LeaseID) (*cltypes.L
 	return &obj, nil
 }
 
-func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service string, cmd []string) error {
+func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service string, cmd []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer) error {
 
 	endpoint, err := url.Parse(c.host.String() + "/" + leaseShellPath(lID))
 	if err != nil {
@@ -381,6 +387,12 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 	query := url.Values{}
 	query.Set("service", service)
 	query.Set("tty", "0")
+
+	stdinValue := "0"
+	if stdin != nil {
+		stdinValue = "1"
+	}
+	query.Set("stdin", stdinValue)
 
 	for i, v := range cmd {
 		query.Set(fmt.Sprintf("cmd%d", i), v)
@@ -404,6 +416,24 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 	}
 
 	_ = response
+
+	if stdin != nil {
+		go func (){
+			data := make([]byte, 256)
+			data[0] = 104
+			for {
+				n, err := stdin.Read(data[1:])
+				if err != nil {
+					return
+				}
+
+				err = conn.WriteMessage(websocket.BinaryMessage, data[0:n+1])
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
 
 	for {
 		messageType, data, err := conn.ReadMessage()
