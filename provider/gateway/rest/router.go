@@ -2,9 +2,11 @@ package rest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+
 	"io"
 	"net/http"
 	"sync"
@@ -139,23 +141,136 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 
 	// POST /lease/<lease-id>/shell
 	lrouter.HandleFunc("/shell",
-		leaseShellHandler(log, pclient.Cluster())).
-		Methods("POST")
+		leaseShellHandler(log, pclient.Cluster()))
 
 	return router
 }
 
+type wsWriterWrapper struct {
+	connection *websocket.Conn
+	messageType int
+	id byte
+	buf bytes.Buffer
+}
+
+func (wsw wsWriterWrapper) Write(data []byte) (int,error) {
+	myBuf := &wsw.buf
+	myBuf.Reset()
+	_ = myBuf.WriteByte(wsw.id)
+	_, _ = myBuf.Write(data)
+
+	err := wsw.connection.WriteMessage(wsw.messageType, myBuf.Bytes())
+
+	return len(data), err
+}
+
 func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc {
 	return func (rw http.ResponseWriter, req *http.Request){
-		err := cclient.Shell(req.Context(), requestLeaseID(req))
-		if err == nil {
-			rw.WriteHeader(http.StatusOK)
+		vars := req.URL.Query()
+		var cmd []string
+
+		for i := 0; true; i++ {
+			v := vars.Get(fmt.Sprintf("cmd%d", i))
+			if 0 == len(v) {
+				break
+			}
+			cmd = append(cmd, v)
+		}
+
+		if len(cmd) == 0{
+			log.Error("missing cmd parameter")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		isTty := vars.Get("tty")
+		if 0 == len(isTty) {
+			log.Error("missing parameter tty")
+			rw.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		service := vars.Get("service")
+		if 0 == len(service) {
+			log.Error("missing parameter service")
+			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 
+		upgrader := websocket.Upgrader{
+			ReadBufferSize:  0,
+			WriteBufferSize: 0,
+		}
 
-		log.Error(fmt.Sprintf("lease shell failed %T; %+v", err, err), "err", err.Error())
-		rw.WriteHeader(http.StatusInternalServerError)
+		ws, err := upgrader.Upgrade(rw, req, nil)
+		if err != nil {
+			// At this point the connection either has a response sent already
+			// or it has been closed
+
+			// TODO - log the error
+			log.Error("failed handshake: %v", err)
+			return
+		}
+
+		stdout := wsWriterWrapper{
+			connection: ws,
+			messageType: websocket.BinaryMessage,
+			id: 100,
+		}
+
+		stderr := wsWriterWrapper{
+			connection: ws,
+			messageType: websocket.BinaryMessage,
+			id: 101,
+		}
+
+		result, err := cclient.Exec(req.Context(), requestLeaseID(req), service, cmd, nil, stdout, stderr)
+
+		responseData := struct{
+			ExitCode int `json:"exit_code,omitempty"`
+			Message string `json:"message,omitempty"`
+		}{
+		}
+
+		resultWriter := wsWriterWrapper{
+			connection: ws,
+			messageType: websocket.BinaryMessage,
+			id: 102,
+		}
+		encodeData := true
+
+		if result != nil {
+			responseData.ExitCode = result.ExitCode()
+
+			log.Debug("lease shell completed", "exitcode", result.ExitCode())
+
+			_, err = resultWriter.Write([]byte{})
+
+			return
+		} else {
+			if cluster.ErrorIsOkToSendToClient(err) {
+				responseData.Message = err.Error()
+			} else {
+				// Don't return errors like this to the client, they could contain information
+				// that shoudl not be let out
+				resultWriter.id = 103
+				encodeData = false
+
+				log.Error("lease exec failed", "err", err)
+			}
+		}
+
+		if encodeData {
+			encoder := json.NewEncoder(resultWriter)
+			err = encoder.Encode(responseData)
+		} else {
+			_, err = resultWriter.Write([]byte{})
+		}
+
+		_ = ws.Close()
+
+		if err != nil {
+			log.Error("failed writing response to client after exec", "err", err)
+		}
+
 		return
 	}
 }

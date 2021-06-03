@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,7 +48,7 @@ type Client interface {
 	LeaseEvents(ctx context.Context, id mtypes.LeaseID, services string, follow bool) (*LeaseKubeEvents, error)
 	LeaseLogs(ctx context.Context, id mtypes.LeaseID, services string, follow bool, tailLines int64) (*ServiceLogs, error)
 	ServiceStatus(ctx context.Context, id mtypes.LeaseID, service string) (*cltypes.ServiceStatus, error)
-	LeaseShell(ctx context.Context, id mtypes.LeaseID) error
+	LeaseShell(ctx context.Context, id mtypes.LeaseID, service string, cmd []string) error
 }
 
 type LeaseKubeEvent struct {
@@ -363,12 +364,66 @@ func (c *client) LeaseStatus(ctx context.Context, id mtypes.LeaseID) (*cltypes.L
 	return &obj, nil
 }
 
-func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID) error {
-	uri, err := makeURI(c.host, leaseShellPath(lID))
+func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service string, cmd []string) error {
+
+	endpoint, err := url.Parse(c.host.String() + "/" + leaseShellPath(lID))
 	if err != nil {
 		return err
 	}
 
+	switch endpoint.Scheme {
+	case schemeWSS, schemeHTTPS:
+		endpoint.Scheme = schemeWSS
+	default:
+		return errors.Errorf("invalid uri scheme %q", endpoint.Scheme)
+	}
+
+	query := url.Values{}
+	query.Set("service", service)
+	query.Set("tty", "0")
+
+	for i, v := range cmd {
+		query.Set(fmt.Sprintf("cmd%d", i), v)
+	}
+
+	endpoint.RawQuery = query.Encode()
+
+	fmt.Printf("dialing %q\n", endpoint.String())
+	conn, response, err := c.wsclient.DialContext(ctx, endpoint.String(), nil)
+	if err != nil {
+		if errors.Is(err, websocket.ErrBadHandshake) {
+			buf := &bytes.Buffer{}
+			_, _ = io.Copy(buf, response.Body)
+
+			return ClientResponseError{
+				Status:  response.StatusCode,
+				Message: buf.String(),
+			}
+		}
+		return err
+	}
+
+	_ = response
+
+	for {
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			return err
+		}
+
+		msgId := data[0]
+		fmt.Printf("Got message type: %d, id %d\n", messageType, msgId)
+
+		os.Stdout.Write(data[1:])
+		os.Stdout.WriteString("\n---\n")
+
+		if msgId == 102 || msgId == 103 {
+			break
+		}
+	}
+
+	return nil
+	/**
 	req, err := http.NewRequestWithContext(ctx, "POST", uri, nil)
 	if err != nil {
 		return err
@@ -389,6 +444,7 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID) error {
 	}
 
 	return createClientResponseErrorIfNotOK(resp, responseBuf)
+	 */
 }
 
 func (c *client) LeaseEvents(ctx context.Context, id mtypes.LeaseID, _ string, follow bool) (*LeaseKubeEvents, error) {

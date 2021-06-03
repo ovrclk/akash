@@ -6,6 +6,8 @@ import (
 	metricsutils "github.com/ovrclk/akash/util/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"strings"
+	"io"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"os"
@@ -34,6 +36,7 @@ import (
 	"github.com/tendermint/tendermint/libs/log"
 
 	"k8s.io/client-go/tools/pager"
+	executil "k8s.io/client-go/util/exec"
 
 	"github.com/ovrclk/akash/manifest"
 	akashclient "github.com/ovrclk/akash/pkg/client/clientset/versioned"
@@ -44,6 +47,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
+	kubev1 "k8s.io/api/core/v1"
 )
 
 var (
@@ -882,80 +886,144 @@ func (c *client) deploymentsForLease(ctx context.Context, lid mtypes.LeaseID) ([
 	return deployments.Items, nil
 }
 
-func (c *client) Shell(_ context.Context, leaseID mtypes.LeaseID) error {
-	/**
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	loadingRules.DefaultClientConfig = &clientcmd.DefaultClientConfig
+type execResult struct {
+	exitCode int
+}
 
-	loadingRules.ExplicitPath = "/home/ericu/.kube/config" // TOOD - use the path from the params
-	overrides := &clientcmd.ConfigOverrides{ClusterDefaults: clientcmd.ClusterDefaults}
+func (er execResult) ExitCode() int{
+	return er.exitCode
+}
 
-	kubeClientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
-	config, err := kubeClientConfig.ClientConfig()
-	if err != nil {
-		return err
-	}
-	**/
-
+func (c *client) Exec(ctx context.Context, leaseID mtypes.LeaseID, serviceName string, cmd []string, stdin io.Reader,
+stdout io.Writer,
+stderr io.Writer) (cluster.ExecResult, error) {
 	namespace := lidNS(leaseID)
-	podName := "web-5546dd7644-6zpl6" // TODO - somehow need to look this up
+
+	deployments, err := c.kc.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
+		TypeMeta:             metav1.TypeMeta{},
+		LabelSelector:        "",
+		FieldSelector:        "",
+		Watch:                false,
+		AllowWatchBookmarks:  false,
+		ResourceVersion:      "",
+		ResourceVersionMatch: "",
+		TimeoutSeconds:       nil,
+		Limit:                0,
+		Continue:             "",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	serviceExists := false
+	for _, deployment := range deployments.Items {
+		if serviceName == deployment.GetName() {
+			serviceExists = true
+		}
+
+	}
+	if !serviceExists {
+		return nil, cluster.ErrExecNoServiceWithName
+	}
+
+	pods, err := c.kc.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		TypeMeta:             metav1.TypeMeta{},
+		LabelSelector:        fmt.Sprintf("akash.network/manifest-service=%s", serviceName),
+		FieldSelector:        "",
+		Watch:                false,
+		AllowWatchBookmarks:  false,
+		ResourceVersion:      "",
+		ResourceVersionMatch: "",
+		TimeoutSeconds:       nil,
+		Limit:                0,
+		Continue:             "",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var podName string
+	for _, pod := range pods.Items {
+		podName = pod.Name
+	}
+
+	// Pod name not found, so it is not running
+	if len(podName) == 0 {
+		return nil, cluster.ErrExecServiceNotRunning
+	}
+
 	subResource := "exec"
 	isRaw := false // set to true for a full terminal
-	cmd := []string{"/bin/sh"}
-	cmd = []string{"/bin/echo", "bananas"} // TODO - parameter
-	containerName := "web" // TODO - figure me out automatically
 
-	groupVersion := schema.GroupVersion{Group: "", Version: "v1"}
-	c.kubeContentConfig.GroupVersion = &groupVersion
-	//c.kubeContentConfig.ContentType = runtime.ContentTypeJSON
-	//c.kubeContentConfig.AcceptContentTypes = runtime.ContentTypeJSON
+	containerName := serviceName
 
-
-	// Scheme is the default instance of runtime.Scheme to which types in the Kubernetes API are already registered.
-	var scheme = runtime.NewScheme()
-
-	codecFactory := serializer.NewCodecFactory(scheme)
-	negotiatedSerializer := runtime.NegotiatedSerializer(codecFactory)
-	c.log.Debug("kube config", "host", c.kubeContentConfig.Host)
-	c.kubeContentConfig.NegotiatedSerializer = negotiatedSerializer
-
-
-	kubeRestClient, err := restclient.RESTClientFor(c.kubeContentConfig)
+	groupVersion := schema.GroupVersion{Group: "api", Version: "v1"}
+	myScheme := runtime.NewScheme()
+	err = kubev1.AddToScheme(myScheme)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	//kubeRestClient := c.kc.AppsV1().RESTClient()
+	myParameterCodec := runtime.NewParameterCodec(myScheme)
+	myScheme.AddKnownTypes(groupVersion, &corev1.PodExecOptions{})
+
+	kubeConfig := *c.kubeContentConfig // Make a local copy of the configuration
+	kubeConfig.GroupVersion = &groupVersion
+
+	codecFactory := serializer.NewCodecFactory(myScheme)
+	negotiatedSerializer := runtime.NegotiatedSerializer(codecFactory)
+	kubeConfig.NegotiatedSerializer = negotiatedSerializer
+
+	kubeRestClient, err := restclient.RESTClientFor(&kubeConfig)
+	if err != nil {
+		return nil, err
+	}
 
 	c.log.Info("Opening container shell", "namespace", namespace, "pod", podName, "container", containerName)
-
 	req := kubeRestClient.Post().Resource("pods").Name(podName).Namespace(namespace).SubResource(subResource)
-
-	// ParameterCodec handles versioning of objects that are converted to query parameters.
-	var parameterCodec = runtime.NewParameterCodec(scheme)
-
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: containerName,
 		Command: cmd,
-		Stdin: false,
-		Stdout: true,
-		Stderr: true,
+		Stdin: stdin != nil,
+		Stdout: stdout != nil,
+		Stderr: stderr != nil,
 		TTY: isRaw,
-	}, parameterCodec)
+	}, myParameterCodec)
 
-	exec, err := remotecommand.NewSPDYExecutor(c.kubeContentConfig, "POST", req.URL())
+	exec, err := remotecommand.NewSPDYExecutor(&kubeConfig, "POST", req.URL())
 	if err != nil {
 		c.log.Error("spdy executor failed", "err", err)
-		return err
+		return nil, err
 	}
 
 	// This can be nil, its only used when the terminal size needs to be updated
 	var tsq remotecommand.TerminalSizeQueue
 
-	return exec.Stream(remotecommand.StreamOptions{
-		Stdin:             os.Stdin, // any reader
-		Stdout:            os.Stdout, // any writer
-		Stderr:            os.Stderr, // any writer
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdin:             stdin, // any reader
+		Stdout:            stdout, // any writer
+		Stderr:            stderr, // any writer
 		Tty:               false,
 		TerminalSizeQueue: tsq,
 	})
+	if err == nil {
+		// No error means the process returned a 0 exit code
+		return execResult{exitCode: 0}, nil
+	}
+
+	// Check to see if the process ran & returned an exit code
+	// If this is true, don't return an error. Something ran in the
+	// container which is what this code was trying to do
+	if err, ok := err.(executil.CodeExitError); ok {
+		return execResult{exitCode: err.Code}, nil
+	}
+
+	// Some errors are basically untyped
+	if strings.Contains(err.Error(), "error executing command in container") {
+		if strings.Contains(err.Error(), "no such file or directory") {
+			return nil, cluster.ErrCommandDoesNotExist
+		}
+		return nil, cluster.ErrCommandExecutionFailed
+	}
+
+	return nil, err
 }

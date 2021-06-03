@@ -36,7 +36,28 @@ type Client interface {
 	TeardownLease(context.Context, mtypes.LeaseID) error
 	Deployments(context.Context) ([]ctypes.Deployment, error)
 	Inventory(context.Context) ([]ctypes.Node, error)
-    Shell(context.Context, mtypes.LeaseID) error
+    Exec(ctx context.Context,
+    	lID mtypes.LeaseID,
+    	service string,
+    	cmd []string,
+    	stdin io.Reader,
+    	stdout io.Writer,
+    	stderr io.Writer) (ExecResult, error)
+}
+
+type ExecResult interface {
+	ExitCode() int
+}
+
+
+var ErrExecNoServiceWithName = errors.New("No such service exists with that name")
+var ErrExecServiceNotRunning = errors.New("Service with that name is not running")
+var ErrCommandExecutionFailed = errors.New("Command execution failed")
+var ErrCommandDoesNotExist = errors.New("The command could not be executed because it does not exist")
+
+func ErrorIsOkToSendToClient(err error) bool {
+	return errors.Is(err, ErrExecNoServiceWithName) || errors.Is(err, ErrExecServiceNotRunning) ||
+		errors.Is(err, ErrCommandExecutionFailed) || errors.Is(err, ErrCommandDoesNotExist)
 }
 
 type node struct {
@@ -251,6 +272,6 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 	}, nil
 }
 
-func (c *nullClient) Shell(context.Context, mtypes.LeaseID) error {
-	return errors.New("not implemented")
+func (c *nullClient) Exec(context.Context, mtypes.LeaseID, string, []string, io.Reader, io.Writer, io.Writer) (ExecResult, error) {
+	return nil, errors.New("not implemented")
 }

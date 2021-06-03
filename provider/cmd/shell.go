@@ -13,11 +13,12 @@ import (
 
 func leaseShellCmd() *cobra.Command {
 	cmd := &cobra.Command{
+		Args: cobra.MinimumNArgs(1),
 		Use:          "lease-shell",
 		Short:        "do lease shell",
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return doLeaseShell(cmd)
+			return doLeaseShell(cmd, args)
 		},
 	}
 
@@ -26,7 +27,7 @@ func leaseShellCmd() *cobra.Command {
 	return cmd
 }
 
-func doLeaseShell(cmd *cobra.Command) error {
+func doLeaseShell(cmd *cobra.Command, args []string) error {
 	cctx, err := sdkclient.GetClientTxContext(cmd)
 	if err != nil {
 		return err
@@ -52,7 +53,9 @@ func doLeaseShell(cmd *cobra.Command) error {
 		return err
 	}
 
-	err = gclient.LeaseShell(cmd.Context(), bid.LeaseID())
+	service := args[0]
+	remoteCmd := args[1:]
+	err = gclient.LeaseShell(cmd.Context(), bid.LeaseID(), service, remoteCmd)
 	if err != nil {
 		return showErrorToUser(err)
 	}
