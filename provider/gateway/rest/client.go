@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -444,8 +443,15 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 		msgId := data[0]
 		fmt.Printf("Got message type: %d, id %d\n", messageType, msgId)
 
-		os.Stdout.Write(data[1:])
-		os.Stdout.WriteString("\n---\n")
+		if msgId == 100 {
+			stdout.Write(data[1:])
+		}
+
+		if msgId == 101 {
+			stderr.Write(data[1:])
+		}
+
+		io.WriteString(stderr,"\n---\n")
 
 		if msgId == 102 || msgId == 103 {
 			break
