@@ -5,9 +5,12 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/ovrclk/akash/util/wsutil"
 	"io"
+	"k8s.io/client-go/tools/remotecommand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -50,7 +53,9 @@ type Client interface {
 	LeaseShell(ctx context.Context, id mtypes.LeaseID, service string, cmd []string,
 		stdin io.Reader,
 		stdout io.Writer,
-		stderr io.Writer) error
+		stderr io.Writer,
+		tty bool,
+		tsq remotecommand.TerminalSizeQueue) error
 }
 
 type LeaseKubeEvent struct {
@@ -369,7 +374,9 @@ func (c *client) LeaseStatus(ctx context.Context, id mtypes.LeaseID) (*cltypes.L
 func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service string, cmd []string,
 	stdin io.Reader,
 	stdout io.Writer,
-	stderr io.Writer) error {
+	stderr io.Writer,
+	tty bool,
+	tsq remotecommand.TerminalSizeQueue) error {
 
 	endpoint, err := url.Parse(c.host.String() + "/" + leaseShellPath(lID))
 	if err != nil {
@@ -385,7 +392,11 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 
 	query := url.Values{}
 	query.Set("service", service)
-	query.Set("tty", "0")
+	ttyValue := "0"
+	if tty {
+		ttyValue = "1"
+	}
+	query.Set("tty", ttyValue)
 
 	stdinValue := "0"
 	if stdin != nil {
@@ -400,6 +411,8 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 	endpoint.RawQuery = query.Encode()
 
 	fmt.Printf("dialing %q\n", endpoint.String())
+
+	// TODO - need to wrap this with tty.Safe call on the terminal to restore the previous terminal settings
 	conn, response, err := c.wsclient.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
 		if errors.Is(err, websocket.ErrBadHandshake) {
@@ -416,24 +429,64 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 
 	_ = response
 
+	l := &sync.Mutex{}
 	if stdin != nil {
 		go func (){
 			data := make([]byte, 256)
-			data[0] = 104
+
+			writer := wsutil.NewWsWriterWrapper(conn, 104, l)
 			for {
-				n, err := stdin.Read(data[1:])
+				n, err := stdin.Read(data)
 				if err != nil {
 					return
 				}
 
-				err = conn.WriteMessage(websocket.BinaryMessage, data[0:n+1])
+				_, err = writer.Write(data[0:n])
 				if err != nil {
+					fmt.Printf("failed writing stdin data: %v", err)
 					return
 				}
 			}
 		}()
 	}
 
+	if tty && tsq != nil {
+		go func () {
+			for {
+				_ = tsq.Next()
+			}
+		}()
+
+		go func () {
+			var w io.Writer
+			w = wsutil.NewWsWriterWrapper(conn, 105, l)
+			buf := bytes.Buffer{}
+			for {
+				size := tsq.Next() // This waits for a value
+				if size == nil {
+					return
+				}
+				// Clear the buffer, then pack in both values
+				(&buf).Reset()
+				err = binary.Write(&buf, binary.BigEndian, size.Width)
+				if err != nil {
+					return
+				}
+				err = binary.Write(&buf, binary.BigEndian, size.Height)
+				if err != nil {
+					return
+				}
+
+				_, err = w.Write((&buf).Bytes())
+				if err != nil {
+					fmt.Printf("failed encoding terminal size: %v", err)
+					return
+				}
+			}
+		}()
+	}
+
+	debug := false
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
@@ -441,7 +494,9 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 		}
 
 		msgId := data[0]
-		fmt.Printf("Got message type: %d, id %d\n", messageType, msgId)
+		if debug {
+			fmt.Fprintf(stderr,"Got message type: %d, id %d\n", messageType, msgId)
+		}
 
 		if msgId == 100 {
 			stdout.Write(data[1:])
@@ -451,7 +506,9 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 			stderr.Write(data[1:])
 		}
 
-		io.WriteString(stderr,"\n---\n")
+		if debug {
+			io.WriteString(stderr, "\n---\n")
+		}
 
 		if msgId == 102 || msgId == 103 {
 			break
@@ -459,28 +516,6 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 	}
 
 	return nil
-	/**
-	req, err := http.NewRequestWithContext(ctx, "POST", uri, nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := c.hclient.Do(req)
-	if err != nil {
-		return err
-	}
-	responseBuf := &bytes.Buffer{}
-	_, err = io.Copy(responseBuf, resp.Body)
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	if err != nil {
-		return err
-	}
-
-	return createClientResponseErrorIfNotOK(resp, responseBuf)
-	 */
 }
 
 func (c *client) LeaseEvents(ctx context.Context, id mtypes.LeaseID, _ string, follow bool) (*LeaseKubeEvents, error) {

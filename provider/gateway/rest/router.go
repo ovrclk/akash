@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
-
+	"github.com/ovrclk/akash/util/wsutil"
 	"io"
+	"k8s.io/client-go/tools/remotecommand"
 	"net/http"
 	"sync"
 	"time"
@@ -146,26 +148,21 @@ func newRouter(log log.Logger, addr sdk.Address, pclient provider.Client) *mux.R
 	return router
 }
 
-type wsWriterWrapper struct {
-	connection *websocket.Conn
-	messageType int
-	id byte
-	buf bytes.Buffer
-}
+type channelToTerminalSizeQueue <- chan remotecommand.TerminalSize
 
-func (wsw wsWriterWrapper) Write(data []byte) (int,error) {
-	myBuf := &wsw.buf
-	myBuf.Reset()
-	_ = myBuf.WriteByte(wsw.id)
-	_, _ = myBuf.Write(data)
+func (sq channelToTerminalSizeQueue) Next() *remotecommand.TerminalSize {
+	v, ok := <- sq
+	if !ok {
+		return nil
+	}
 
-	err := wsw.connection.WriteMessage(wsw.messageType, myBuf.Bytes())
-
-	return len(data), err
+	return &v // Interface is dumb and use a pointer
 }
 
 func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc {
 	return func (rw http.ResponseWriter, req *http.Request){
+		// TODO - if the deploy is in a sensible state, just return
+		// an error code immediately. Obviously it isn't going to work
 		vars := req.URL.Query()
 		var cmd []string
 
@@ -182,12 +179,14 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		isTty := vars.Get("tty")
-		if 0 == len(isTty) {
+		tty := vars.Get("tty")
+		if 0 == len(tty) {
 			log.Error("missing parameter tty")
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
+		isTty := tty == "1"
+
 		service := vars.Get("service")
 		if 0 == len(service) {
 			log.Error("missing parameter service")
@@ -201,7 +200,6 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			rw.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
 		connectStdin := stdin == "1"
 
 		upgrader := websocket.Upgrader{
@@ -220,6 +218,14 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 		var stdinPipeOut *io.PipeWriter
 		var stdinPipeIn *io.PipeReader
 		wg := &sync.WaitGroup{}
+
+		var tsq remotecommand.TerminalSizeQueue
+		var terminalSizeUpdate chan remotecommand.TerminalSize
+		if isTty {
+			terminalSizeUpdate = make(chan remotecommand.TerminalSize, 1)
+			tsq = channelToTerminalSizeQueue(terminalSizeUpdate)
+		}
+
 		if connectStdin {
 			stdinPipeIn, stdinPipeOut = io.Pipe()
 
@@ -232,10 +238,31 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 						return
 					}
 
-					if msgType == websocket.BinaryMessage && len(data) > 1 && data[0] == 104 {
-						_, err := stdinPipeOut.Write(data[1:])
-						if err != nil {
-							return
+					if msgType == websocket.BinaryMessage && len(data) > 1  {
+						msgId := data[0]
+						if msgId == 104 {
+							_, err := stdinPipeOut.Write(data[1:])
+							if err != nil {
+								return
+							}
+						}
+						if msgId == 105 {
+							var size remotecommand.TerminalSize
+							r := bytes.NewReader(data[1:])
+							err = binary.Read(r, binary.BigEndian, &size.Width)
+							if err != nil {
+								return
+							}
+							err = binary.Read(r, binary.BigEndian, &size.Height)
+							if err != nil {
+								return
+							}
+
+							log.Debug("terminal resize received", "width", size.Width, "height", size.Height)
+							// TODO - send me in via the interface
+							if terminalSizeUpdate != nil {
+								terminalSizeUpdate <- size
+							}
 						}
 					}
 				}
@@ -243,59 +270,39 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 			}()
 		}
 
-		stdout := wsWriterWrapper{
-			connection: ws,
-			messageType: websocket.BinaryMessage,
-			id: 100,
-		}
-
-		stderr := wsWriterWrapper{
-			connection: ws,
-			messageType: websocket.BinaryMessage,
-			id: 101,
-		}
+		l := &sync.Mutex{}
+		stdout := wsutil.NewWsWriterWrapper(ws, 100, l)
+		stderr := wsutil.NewWsWriterWrapper(ws, 101, l)
 
 		var stdinForExec io.Reader
 		if connectStdin {
 			stdinForExec = stdinPipeIn
 		}
-		result, err := cclient.Exec(req.Context(), requestLeaseID(req), service, cmd, stdinForExec, stdout, stderr)
-
-		if stdinPipeOut != nil {
-			_ = stdinPipeOut.Close()
-		}
-		if stdinPipeIn != nil {
-			_ = stdinPipeIn.Close()
-		}
+		result, err := cclient.Exec(req.Context(), requestLeaseID(req), service, cmd, stdinForExec, stdout, stderr, isTty, tsq)
 
 		responseData := struct{
-			ExitCode int `json:"exit_code,omitempty"`
+			ExitCode int `json:"exit_code"`
 			Message string `json:"message,omitempty"`
 		}{
 		}
 
-		resultWriter := wsWriterWrapper{
-			connection: ws,
-			messageType: websocket.BinaryMessage,
-			id: 102,
-		}
+		var resultWriter io.Writer
+
 		encodeData := true
+
+		resultWriter = wsutil.NewWsWriterWrapper(ws, 102, l)
 
 		if result != nil {
 			responseData.ExitCode = result.ExitCode()
 
 			log.Debug("lease shell completed", "exitcode", result.ExitCode())
-
-			_, err = resultWriter.Write([]byte{})
-
-			return
 		} else {
 			if cluster.ErrorIsOkToSendToClient(err) {
 				responseData.Message = err.Error()
 			} else {
+				resultWriter = wsutil.NewWsWriterWrapper(ws, 103, l)
 				// Don't return errors like this to the client, they could contain information
 				// that should not be let out
-				resultWriter.id = 103
 				encodeData = false
 
 				log.Error("lease exec failed", "err", err)
@@ -316,6 +323,18 @@ func leaseShellHandler(log log.Logger, cclient cluster.Client) http.HandlerFunc 
 		}
 
 		wg.Wait()
+
+		if stdinPipeOut != nil {
+			_ = stdinPipeOut.Close()
+		}
+		if stdinPipeIn != nil {
+			_ = stdinPipeIn.Close()
+		}
+
+		if terminalSizeUpdate != nil {
+			close(terminalSizeUpdate)
+		}
+
 		return
 	}
 }

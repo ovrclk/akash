@@ -896,7 +896,8 @@ func (er execResult) ExitCode() int{
 
 func (c *client) Exec(ctx context.Context, leaseID mtypes.LeaseID, serviceName string, cmd []string, stdin io.Reader,
 stdout io.Writer,
-stderr io.Writer) (cluster.ExecResult, error) {
+stderr io.Writer, tty bool,
+	tsq remotecommand.TerminalSizeQueue) (cluster.ExecResult, error) {
 	namespace := lidNS(leaseID)
 
 	deployments, err := c.kc.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
@@ -953,7 +954,6 @@ stderr io.Writer) (cluster.ExecResult, error) {
 	}
 
 	subResource := "exec"
-	isRaw := false // set to true for a full terminal
 
 	containerName := serviceName
 
@@ -979,6 +979,9 @@ stderr io.Writer) (cluster.ExecResult, error) {
 	}
 
 	c.log.Info("Opening container shell", "namespace", namespace, "pod", podName, "container", containerName)
+	if tty {
+		stderr = nil
+	}
 	req := kubeRestClient.Post().Resource("pods").Name(podName).Namespace(namespace).SubResource(subResource)
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: containerName,
@@ -986,7 +989,7 @@ stderr io.Writer) (cluster.ExecResult, error) {
 		Stdin: stdin != nil,
 		Stdout: stdout != nil,
 		Stderr: stderr != nil,
-		TTY: isRaw,
+		TTY: tty,
 	}, myParameterCodec)
 
 	exec, err := remotecommand.NewSPDYExecutor(&kubeConfig, "POST", req.URL())
@@ -995,14 +998,11 @@ stderr io.Writer) (cluster.ExecResult, error) {
 		return nil, err
 	}
 
-	// This can be nil, its only used when the terminal size needs to be updated
-	var tsq remotecommand.TerminalSizeQueue
-
 	err = exec.Stream(remotecommand.StreamOptions{
 		Stdin:             stdin, // any reader
 		Stdout:            stdout, // any writer
 		Stderr:            stderr, // any writer
-		Tty:               false,
+		Tty:               tty,
 		TerminalSizeQueue: tsq,
 	})
 	if err == nil {

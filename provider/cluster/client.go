@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"k8s.io/client-go/tools/remotecommand"
 	"math/rand"
 	"sync"
 	"time"
@@ -42,7 +43,9 @@ type Client interface {
     	cmd []string,
     	stdin io.Reader,
     	stdout io.Writer,
-    	stderr io.Writer) (ExecResult, error)
+    	stderr io.Writer,
+    	tty bool,
+    	tsq remotecommand.TerminalSizeQueue) (ExecResult, error)
 }
 
 type ExecResult interface {
@@ -271,6 +274,6 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 	}, nil
 }
 
-func (c *nullClient) Exec(context.Context, mtypes.LeaseID, string, []string, io.Reader, io.Writer, io.Writer) (ExecResult, error) {
+func (c *nullClient) Exec(context.Context, mtypes.LeaseID, string, []string, io.Reader, io.Writer, io.Writer, bool, remotecommand.TerminalSizeQueue) (ExecResult, error) {
 	return nil, errors.New("not implemented")
 }
