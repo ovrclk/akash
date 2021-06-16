@@ -5,12 +5,13 @@ import (
 	"math/big"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
-
 	"github.com/ovrclk/akash/x/cert/types"
 )
 
 const (
-	keyAddrPrefixLen = 1 + sdk.AddrLen
+	// AddrLen defines a valid address length
+	AddrLen          = 20
+	keyAddrPrefixLen = 1 + AddrLen
 )
 
 var (

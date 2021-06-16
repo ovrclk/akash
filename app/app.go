@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/server/api"
 	"github.com/cosmos/cosmos-sdk/server/config"
 	"github.com/cosmos/cosmos-sdk/simapp"
+	storetypes "github.com/cosmos/cosmos-sdk/store/types"
 	"github.com/cosmos/cosmos-sdk/testutil/testdata"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
@@ -25,6 +27,9 @@ import (
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"github.com/cosmos/cosmos-sdk/x/auth/vesting"
+	"github.com/cosmos/cosmos-sdk/x/authz"
+	authzkeeper "github.com/cosmos/cosmos-sdk/x/authz/keeper"
+	authzmodule "github.com/cosmos/cosmos-sdk/x/authz/module"
 	"github.com/cosmos/cosmos-sdk/x/bank"
 	bankkeeper "github.com/cosmos/cosmos-sdk/x/bank/keeper"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
@@ -36,24 +41,26 @@ import (
 	"github.com/cosmos/cosmos-sdk/x/evidence"
 	evidencekeeper "github.com/cosmos/cosmos-sdk/x/evidence/keeper"
 	evidencetypes "github.com/cosmos/cosmos-sdk/x/evidence/types"
+	"github.com/cosmos/cosmos-sdk/x/feegrant"
+	feegrantkeeper "github.com/cosmos/cosmos-sdk/x/feegrant/keeper"
+	feegrantmodule "github.com/cosmos/cosmos-sdk/x/feegrant/module"
 	"github.com/cosmos/cosmos-sdk/x/genutil"
 	genutiltypes "github.com/cosmos/cosmos-sdk/x/genutil/types"
 	"github.com/cosmos/cosmos-sdk/x/gov"
 	govkeeper "github.com/cosmos/cosmos-sdk/x/gov/keeper"
 	govtypes "github.com/cosmos/cosmos-sdk/x/gov/types"
-	transfer "github.com/cosmos/cosmos-sdk/x/ibc/applications/transfer"
-	ibc "github.com/cosmos/cosmos-sdk/x/ibc/core"
-	porttypes "github.com/cosmos/cosmos-sdk/x/ibc/core/05-port/types"
 	"github.com/cosmos/cosmos-sdk/x/mint"
 	mintkeeper "github.com/cosmos/cosmos-sdk/x/mint/keeper"
 	minttypes "github.com/cosmos/cosmos-sdk/x/mint/types"
 	"github.com/cosmos/cosmos-sdk/x/upgrade"
 	upgradekeeper "github.com/cosmos/cosmos-sdk/x/upgrade/keeper"
 	upgradetypes "github.com/cosmos/cosmos-sdk/x/upgrade/types"
+	transfer "github.com/cosmos/ibc-go/modules/apps/transfer"
+	ibc "github.com/cosmos/ibc-go/modules/core"
+	porttypes "github.com/cosmos/ibc-go/modules/core/05-port/types"
 	"github.com/gorilla/mux"
 	"github.com/rakyll/statik/fs"
 	"github.com/spf13/cast"
-	tmjson "github.com/tendermint/tendermint/libs/json"
 
 	"github.com/cosmos/cosmos-sdk/x/params"
 	paramskeeper "github.com/cosmos/cosmos-sdk/x/params/keeper"
@@ -63,7 +70,6 @@ import (
 	stakingkeeper "github.com/cosmos/cosmos-sdk/x/staking/keeper"
 	stakingtypes "github.com/cosmos/cosmos-sdk/x/staking/types"
 
-	"github.com/ovrclk/akash/app/migrations"
 	"github.com/ovrclk/akash/x/audit"
 	"github.com/ovrclk/akash/x/cert"
 	escrowkeeper "github.com/ovrclk/akash/x/escrow/keeper"
@@ -81,14 +87,14 @@ import (
 	distr "github.com/cosmos/cosmos-sdk/x/distribution"
 	distrkeeper "github.com/cosmos/cosmos-sdk/x/distribution/keeper"
 	distrtypes "github.com/cosmos/cosmos-sdk/x/distribution/types"
-	ibctransferkeeper "github.com/cosmos/cosmos-sdk/x/ibc/applications/transfer/keeper"
-	ibctransfertypes "github.com/cosmos/cosmos-sdk/x/ibc/applications/transfer/types"
-	ibcclient "github.com/cosmos/cosmos-sdk/x/ibc/core/02-client"
-	ibchost "github.com/cosmos/cosmos-sdk/x/ibc/core/24-host"
-	ibckeeper "github.com/cosmos/cosmos-sdk/x/ibc/core/keeper"
 	"github.com/cosmos/cosmos-sdk/x/slashing"
 	slashingkeeper "github.com/cosmos/cosmos-sdk/x/slashing/keeper"
 	slashingtypes "github.com/cosmos/cosmos-sdk/x/slashing/types"
+	ibctransferkeeper "github.com/cosmos/ibc-go/modules/apps/transfer/keeper"
+	ibctransfertypes "github.com/cosmos/ibc-go/modules/apps/transfer/types"
+	ibcclient "github.com/cosmos/ibc-go/modules/core/02-client"
+	ibchost "github.com/cosmos/ibc-go/modules/core/24-host"
+	ibckeeper "github.com/cosmos/ibc-go/modules/core/keeper"
 
 	dkeeper "github.com/ovrclk/akash/x/deployment/keeper"
 	mkeeper "github.com/ovrclk/akash/x/market/keeper"
@@ -105,16 +111,13 @@ const (
 var (
 	DefaultHome                         = os.ExpandEnv("$HOME/.akash")
 	_           servertypes.Application = (*AkashApp)(nil)
-
-	// module accounts that are allowed to receive tokens
-	allowedReceivingModAcc = map[string]bool{}
 )
 
 // AkashApp extends ABCI appplication
 type AkashApp struct {
 	*bam.BaseApp
 	cdc               *codec.LegacyAmino
-	appCodec          codec.Marshaler
+	appCodec          codec.Codec
 	interfaceRegistry codectypes.InterfaceRegistry
 
 	invCheckPeriod uint
@@ -135,9 +138,11 @@ type AkashApp struct {
 		crisis   crisiskeeper.Keeper
 		upgrade  upgradekeeper.Keeper
 		params   paramskeeper.Keeper
+		authz    authzkeeper.Keeper
 		ibc      *ibckeeper.Keeper
 		evidence evidencekeeper.Keeper
 		transfer ibctransferkeeper.Keeper
+		feegrant feegrantkeeper.Keeper
 
 		// make scoped keepers public for test purposes
 		scopedIBC      capabilitykeeper.ScopedKeeper
@@ -156,6 +161,9 @@ type AkashApp struct {
 
 	// simulation manager
 	sm *module.SimulationManager
+
+	// the configurator
+	configurator module.Configurator
 }
 
 // https://github.com/cosmos/sdk-tutorials/blob/c6754a1e313eb1ed973c5c91dcc606f2fd288811/app.go#L73
@@ -174,7 +182,7 @@ func NewApp(
 
 	bapp := bam.NewBaseApp(AppName, logger, db, encodingConfig.TxConfig.TxDecoder(), options...)
 	bapp.SetCommitMultiStoreTracer(tio)
-	bapp.SetAppVersion(version.Version)
+	bapp.SetVersion(version.Version)
 	bapp.SetInterfaceRegistry(interfaceRegistry)
 
 	keys := kvStoreKeys()
@@ -215,7 +223,7 @@ func NewApp(
 		app.keys[banktypes.StoreKey],
 		app.keeper.acct,
 		app.GetSubspace(banktypes.ModuleName),
-		app.BlockedAddrs(),
+		app.ModuleAccountAddrs(),
 	)
 
 	skeeper := stakingkeeper.NewKeeper(
@@ -261,14 +269,55 @@ func NewApp(
 		authtypes.FeeCollectorName,
 	)
 
-	app.keeper.upgrade = upgradekeeper.NewKeeper(skipUpgradeHeights, app.keys[upgradetypes.StoreKey], appCodec, homePath)
+	app.keeper.feegrant = feegrantkeeper.NewKeeper(appCodec, keys[feegrant.StoreKey], app.keeper.acct)
 
-	app.keeper.upgrade.SetUpgradeHandler("akashnet-2-upgrade-1", func(ctx sdk.Context, plan upgradetypes.Plan) {
-		migrations.MigrateAkashnet2Upgrade1(ctx, app.keeper.acct, app.keeper.bank, app.keeper.staking)
+	app.keeper.upgrade = upgradekeeper.NewKeeper(skipUpgradeHeights, app.keys[upgradetypes.StoreKey], appCodec,
+		homePath, app.BaseApp)
 
-		// Set staking HistoricalEntries to 10000, required positive value for ibc
-		app.GetSubspace(stakingtypes.ModuleName).Set(ctx, stakingtypes.KeyHistoricalEntries, uint32(10000))
+	app.keeper.upgrade.SetUpgradeHandler("v0.43.0-beta1-upgrade", func(ctx sdk.Context, plan upgradetypes.Plan,
+		_ module.VersionMap) (module.VersionMap, error) {
+		// 1st-time running in-store migrations, using 1 as fromVersion to
+		// avoid running InitGenesis.
+		fromVM := map[string]uint64{
+			"auth":         1,
+			"bank":         1,
+			"capability":   1,
+			"crisis":       1,
+			"distribution": 1,
+			"evidence":     1,
+			"gov":          1,
+			"mint":         1,
+			"params":       1,
+			"slashing":     1,
+			"staking":      1,
+			"upgrade":      1,
+			"vesting":      1,
+			"ibc":          1,
+			"genutil":      1,
+			"transfer":     1,
+			"audit":        1,
+			"cert":         1,
+			"deployment":   1,
+			"escrow":       1,
+			"market":       1,
+			"provider":     1,
+		}
+		return app.mm.RunMigrations(ctx, app.configurator, fromVM)
 	})
+
+	upgradeInfo, err := app.keeper.upgrade.ReadUpgradeInfoFromDisk()
+	if err != nil {
+		panic(err)
+	}
+
+	if upgradeInfo.Name == "v0.43.0-beta1-upgrade" && !app.keeper.upgrade.IsSkipHeight(upgradeInfo.Height) {
+		storeUpgrades := storetypes.StoreUpgrades{
+			Added: []string{"authz", "feegrant"},
+		}
+
+		// configure store loader that checks if version == upgradeHeight and applies store upgrades
+		app.SetStoreLoader(upgradetypes.UpgradeStoreLoader(upgradeInfo.Height, &storeUpgrades))
+	}
 
 	// register the staking hooks
 	// NOTE: stakingKeeper above is passed by reference, so that it will contain these hooks
@@ -279,10 +328,11 @@ func NewApp(
 		),
 	)
 
+	app.keeper.authz = authzkeeper.NewKeeper(keys[authzkeeper.StoreKey], appCodec, app.BaseApp.MsgServiceRouter())
+
 	// register IBC Keeper
-	app.keeper.ibc = ibckeeper.NewKeeper(
-		appCodec, app.keys[ibchost.StoreKey], app.GetSubspace(ibchost.ModuleName), app.keeper.staking, scopedIBCKeeper,
-	)
+	app.keeper.ibc = ibckeeper.NewKeeper(appCodec, app.keys[ibchost.StoreKey], app.GetSubspace(ibchost.ModuleName),
+		app.keeper.staking, app.keeper.upgrade, scopedIBCKeeper)
 
 	// register the proposal types
 	govRouter := govtypes.NewRouter()
@@ -290,9 +340,9 @@ func NewApp(
 		AddRoute(paramproposal.RouterKey, params.NewParamChangeProposalHandler(app.keeper.params)).
 		AddRoute(distrtypes.RouterKey, distr.NewCommunityPoolSpendProposalHandler(app.keeper.distr)).
 		AddRoute(upgradetypes.RouterKey, upgrade.NewSoftwareUpgradeProposalHandler(app.keeper.upgrade)).
-		AddRoute(ibchost.RouterKey, ibcclient.NewClientUpdateProposalHandler(app.keeper.ibc.ClientKeeper))
+		AddRoute(ibchost.RouterKey, ibcclient.NewClientProposalHandler(app.keeper.ibc.ClientKeeper))
 
-	app.keeper.gov = govkeeper.NewKeeper(
+	govKeeper := govkeeper.NewKeeper(
 		appCodec,
 		app.keys[govtypes.StoreKey],
 		app.GetSubspace(govtypes.ModuleName),
@@ -300,6 +350,12 @@ func NewApp(
 		app.keeper.bank,
 		&skeeper,
 		govRouter,
+	)
+
+	app.keeper.gov = *govKeeper.SetHooks(
+		govtypes.NewMultiGovHooks(
+		// register the governance hooks
+		),
 	)
 
 	// register Transfer Keepers
@@ -337,6 +393,8 @@ func NewApp(
 			bank.NewAppModule(appCodec, app.keeper.bank, app.keeper.acct),
 			capability.NewAppModule(appCodec, *app.keeper.cap),
 			crisis.NewAppModule(&app.keeper.crisis, skipGenesisInvariants),
+			feegrantmodule.NewAppModule(appCodec, app.keeper.acct, app.keeper.bank,
+				app.keeper.feegrant, app.interfaceRegistry),
 			gov.NewAppModule(appCodec, app.keeper.gov, app.keeper.acct, app.keeper.bank),
 			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct),
 			slashing.NewAppModule(appCodec, app.keeper.slashing, app.keeper.acct, app.keeper.bank, app.keeper.staking),
@@ -347,6 +405,7 @@ func NewApp(
 			ibc.NewAppModule(app.keeper.ibc),
 			params.NewAppModule(app.keeper.params),
 			transferModule,
+			authzmodule.NewAppModule(appCodec, app.keeper.authz, app.keeper.acct, app.keeper.bank, app.interfaceRegistry),
 		}, app.akashAppModules()...)...,
 	)
 
@@ -378,6 +437,8 @@ func NewApp(
 			genutiltypes.ModuleName,
 			evidencetypes.ModuleName,
 			ibctransfertypes.ModuleName,
+			authz.ModuleName,
+			feegrant.ModuleName,
 		},
 
 			app.akashInitGenesisOrder()...,
@@ -386,7 +447,8 @@ func NewApp(
 
 	app.mm.RegisterInvariants(&app.keeper.crisis)
 	app.mm.RegisterRoutes(app.Router(), app.QueryRouter(), encodingConfig.Amino)
-	app.mm.RegisterServices(module.NewConfigurator(app.MsgServiceRouter(), app.GRPCQueryRouter()))
+	app.configurator = module.NewConfigurator(app.appCodec, app.MsgServiceRouter(), app.GRPCQueryRouter())
+	app.mm.RegisterServices(app.configurator)
 
 	// add test gRPC service for testing gRPC queries in isolation
 	testdata.RegisterQueryServer(app.GRPCQueryRouter(), testdata.QueryImpl{})
@@ -396,6 +458,8 @@ func NewApp(
 			auth.NewAppModule(appCodec, app.keeper.acct, authsims.RandomGenesisAccounts),
 			bank.NewAppModule(appCodec, app.keeper.bank, app.keeper.acct),
 			capability.NewAppModule(appCodec, *app.keeper.cap),
+			feegrantmodule.NewAppModule(appCodec, app.keeper.acct, app.keeper.bank,
+				app.keeper.feegrant, app.interfaceRegistry),
 			gov.NewAppModule(appCodec, app.keeper.gov, app.keeper.acct, app.keeper.bank),
 			mint.NewAppModule(appCodec, app.keeper.mint, app.keeper.acct),
 			staking.NewAppModule(appCodec, app.keeper.staking, app.keeper.acct, app.keeper.bank),
@@ -405,6 +469,7 @@ func NewApp(
 			evidence.NewAppModule(app.keeper.evidence),
 			ibc.NewAppModule(app.keeper.ibc),
 			transferModule,
+			authzmodule.NewAppModule(appCodec, app.keeper.authz, app.keeper.acct, app.keeper.bank, app.interfaceRegistry),
 		},
 			app.akashSimModules()...,
 		)...,
@@ -421,15 +486,21 @@ func NewApp(
 	app.SetInitChainer(app.InitChainer)
 	app.SetBeginBlocker(app.BeginBlocker)
 
-	app.SetAnteHandler(
-		ante.NewAnteHandler(
-			app.keeper.acct,
-			app.keeper.bank,
-			ante.DefaultSigVerificationGasConsumer,
-			encodingConfig.TxConfig.SignModeHandler(),
-		),
+	anteHandler, err := ante.NewAnteHandler(
+		ante.HandlerOptions{
+			AccountKeeper:   app.keeper.acct,
+			BankKeeper:      app.keeper.bank,
+			SignModeHandler: encodingConfig.TxConfig.SignModeHandler(),
+			FeegrantKeeper:  app.keeper.feegrant,
+			SigGasConsumer:  ante.DefaultSigVerificationGasConsumer,
+		},
 	)
 
+	if err != nil {
+		panic(err)
+	}
+
+	app.SetAnteHandler(anteHandler)
 	app.SetEndBlocker(app.EndBlocker)
 
 	if loadLatest {
@@ -457,7 +528,7 @@ func NewApp(
 // MakeCodecs constructs the *std.Codec and *codec.LegacyAmino instances used by
 // simapp. It is useful for tests and clients who do not want to construct the
 // full simapp
-func MakeCodecs() (codec.Marshaler, *codec.LegacyAmino) {
+func MakeCodecs() (codec.Codec, *codec.LegacyAmino) {
 	config := MakeEncodingConfig()
 	return config.Marshaler, config.Amino
 }
@@ -468,9 +539,10 @@ func (app *AkashApp) Name() string { return app.BaseApp.Name() }
 // InitChainer application update at chain initialization
 func (app *AkashApp) InitChainer(ctx sdk.Context, req abci.RequestInitChain) abci.ResponseInitChain {
 	var genesisState simapp.GenesisState
-	if err := tmjson.Unmarshal(req.AppStateBytes, &genesisState); err != nil {
+	if err := json.Unmarshal(req.AppStateBytes, &genesisState); err != nil {
 		panic(err)
 	}
+	app.keeper.upgrade.SetModuleVersionMap(ctx, app.mm.GetVersionMap())
 	return app.mm.InitGenesis(ctx, app.appCodec, genesisState)
 }
 
@@ -492,25 +564,13 @@ func (app *AkashApp) LegacyAmino() *codec.LegacyAmino {
 }
 
 // AppCodec returns AkashApp's app codec.
-func (app *AkashApp) AppCodec() codec.Marshaler {
+func (app *AkashApp) AppCodec() codec.Codec {
 	return app.appCodec
 }
 
 // ModuleAccountAddrs returns all the app's module account addresses.
 func (app *AkashApp) ModuleAccountAddrs() map[string]bool {
 	return MacAddrs()
-}
-
-// BlockedAddrs returns all the app's module account addresses that are not
-// allowed to receive external tokens.
-func (app *AkashApp) BlockedAddrs() map[string]bool {
-	perms := MacPerms()
-	blockedAddrs := make(map[string]bool)
-	for acc := range perms {
-		blockedAddrs[authtypes.NewModuleAddress(acc).String()] = !allowedReceivingModAcc[acc]
-	}
-
-	return blockedAddrs
 }
 
 // InterfaceRegistry returns AkashApp's InterfaceRegistry
@@ -588,7 +648,7 @@ func (app *AkashApp) LoadHeight(height int64) error {
 }
 
 // initParamsKeeper init params keeper and its subspaces
-func initParamsKeeper(appCodec codec.BinaryMarshaler, legacyAmino *codec.LegacyAmino, key, tkey sdk.StoreKey) paramskeeper.Keeper {
+func initParamsKeeper(appCodec codec.BinaryCodec, legacyAmino *codec.LegacyAmino, key, tkey sdk.StoreKey) paramskeeper.Keeper {
 	paramsKeeper := paramskeeper.NewKeeper(appCodec, legacyAmino, key, tkey)
 
 	paramsKeeper.Subspace(authtypes.ModuleName)
