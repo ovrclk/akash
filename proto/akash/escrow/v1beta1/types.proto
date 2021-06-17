@@ -53,10 +53,10 @@ message Account {
     (gogoproto.moretags) = "yaml:\"state\""
   ];
 
-  cosmos.base.v1beta1.Coin balance   = 4 [
+  cosmos.base.v1beta1.Coin total_balance   = 4 [
     (gogoproto.nullable) = false,
-    (gogoproto.jsontag)  = "balance",
-    (gogoproto.moretags) = "yaml:\"balance\""
+    (gogoproto.jsontag)  = "totalBalance",
+    (gogoproto.moretags) = "yaml:\"totalBalance\""
   ];
 
   cosmos.base.v1beta1.Coin transferred = 5 [
@@ -69,6 +69,18 @@ message Account {
     (gogoproto.jsontag)    = "settledAt",
     (gogoproto.moretags)   = "yaml:\"settledAt\"",
     (gogoproto.customname) = "SettledAt"
+  ];
+
+  cosmos.base.v1beta1.Coin credits_balance   = 7 [
+    (gogoproto.nullable) = false,
+    (gogoproto.jsontag)  = "creditsBalance",
+    (gogoproto.moretags) = "yaml:\"creditsBalance\""
+  ];
+
+  cosmos.base.v1beta1.Coin tokens_balance   = 8 [
+    (gogoproto.nullable) = false,
+    (gogoproto.jsontag)  = "tokensBalances",
+    (gogoproto.moretags) = "yaml:\"tokensBalance\""
   ];
 }
 
