@@ -16,6 +16,7 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/kubectl/pkg/util/term"
 	"os"
+	"sync"
 )
 
 const (
@@ -51,7 +52,7 @@ func leaseShellCmd() *cobra.Command {
 }
 
 func doLeaseShell(cmd *cobra.Command, args []string) error {
-	var stdin io.Reader
+	var stdin io.ReadCloser
 	var stdout io.Writer
 	var stderr io.Writer
 	stdout = os.Stdout
@@ -66,7 +67,7 @@ func doLeaseShell(cmd *cobra.Command, args []string) error {
 	var tsq remotecommand.TerminalSizeQueue
 	if setupTty {
 		tty = term.TTY{
-			Parent: nil, // TODO setup interrupt parent and pass it to the remote end
+			Parent: nil,
 			Out: os.Stdout,
 			In: stdin,
 		}
@@ -83,8 +84,8 @@ func doLeaseShell(cmd *cobra.Command, args []string) error {
 		stdin = dockerStdin
 		stdout = dockerStdout
 		tsq = tty.MonitorSize(tty.GetSize())
+		tty.Raw = true
 	}
-
 
 	cctx, err := sdkclient.GetClientTxContext(cmd)
 	if err != nil {
@@ -113,7 +114,34 @@ func doLeaseShell(cmd *cobra.Command, args []string) error {
 
 	service := args[0]
 	remoteCmd := args[1:]
-	err = gclient.LeaseShell(cmd.Context(), bid.LeaseID(), service, remoteCmd, stdin, stdout, stderr, setupTty, tsq)
+
+	var terminalResizes chan remotecommand.TerminalSize
+	wg := &sync.WaitGroup{}
+	if tsq != nil {
+		terminalResizes = make(chan remotecommand.TerminalSize, 1)
+		wg.Add(1)
+		go func () {
+			defer wg.Done()
+			for {
+				size := tsq.Next() // this blocks waiting for a resize event
+				if size == nil {   // this means reisze events have ended
+					close(terminalResizes)
+					return
+				}
+
+				terminalResizes <- *size
+			}
+		}()
+	}
+
+	leaseShellFn := func() error {
+		return gclient.LeaseShell(cmd.Context(), bid.LeaseID(), service, remoteCmd, stdin, stdout, stderr, setupTty, terminalResizes)
+	}
+	if setupTty {
+		err = tty.Safe(leaseShellFn)
+	} else {
+		err = leaseShellFn()
+	}
 	if err != nil {
 		return showErrorToUser(err)
 	}

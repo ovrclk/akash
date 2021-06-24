@@ -6,12 +6,12 @@ import (
 	metricsutils "github.com/ovrclk/akash/util/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
-	"strings"
 	"io"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"os"
 	"path"
+	"strings"
 
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -44,10 +44,10 @@ import (
 	"github.com/ovrclk/akash/types"
 	mtypes "github.com/ovrclk/akash/x/market/types"
 
+	kubev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
-	kubev1 "k8s.io/api/core/v1"
 )
 
 var (
@@ -898,6 +898,10 @@ func (c *client) Exec(ctx context.Context, leaseID mtypes.LeaseID, serviceName s
 stdout io.Writer,
 stderr io.Writer, tty bool,
 	tsq remotecommand.TerminalSizeQueue) (cluster.ExecResult, error) {
+
+
+	// TODO - check if deployment actually exists in the first place before querying kubernetes
+
 	namespace := lidNS(leaseID)
 
 	deployments, err := c.kc.AppsV1().Deployments(namespace).List(ctx, metav1.ListOptions{
@@ -913,7 +917,12 @@ stderr io.Writer, tty bool,
 		Continue:             "",
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: failed getting deployments for namespace %q", err, namespace)
+	}
+
+	// If no deployments are found yet then the deployment hasn't been spun up kubernetes yet
+	if 0 == len(deployments.Items) {
+		return nil, cluster.ErrDeploymentNotYetRunning
 	}
 
 	serviceExists := false
@@ -940,7 +949,12 @@ stderr io.Writer, tty bool,
 		Continue:             "",
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: failed getting pods in namespace %q", err, namespace)
+	}
+
+	// If no pods are found yet then the deployment hasn't been spun up kubernetes yet
+	if 0 == len(pods.Items) {
+		return nil, cluster.ErrDeploymentNotYetRunning
 	}
 
 	var podName string
@@ -953,7 +967,7 @@ stderr io.Writer, tty bool,
 		return nil, cluster.ErrExecServiceNotRunning
 	}
 
-	subResource := "exec"
+	const subResource = "exec"
 
 	containerName := serviceName
 
@@ -975,13 +989,15 @@ stderr io.Writer, tty bool,
 
 	kubeRestClient, err := restclient.RESTClientFor(&kubeConfig)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: failed getting REST client", err)
 	}
 
 	c.log.Info("Opening container shell", "namespace", namespace, "pod", podName, "container", containerName)
 	if tty {
 		stderr = nil
 	}
+	// TODO - probably need to figure out what happens here with multiple containers and try and select the
+	// same container each time if possible
 	req := kubeRestClient.Post().Resource("pods").Name(podName).Namespace(namespace).SubResource(subResource)
 	req.VersionedParams(&corev1.PodExecOptions{
 		Container: containerName,
@@ -994,8 +1010,7 @@ stderr io.Writer, tty bool,
 
 	exec, err := remotecommand.NewSPDYExecutor(&kubeConfig, "POST", req.URL())
 	if err != nil {
-		c.log.Error("spdy executor failed", "err", err)
-		return nil, err
+		return nil, fmt.Errorf("%w: execution via SPDY failed", err)
 	}
 
 	err = exec.Stream(remotecommand.StreamOptions{

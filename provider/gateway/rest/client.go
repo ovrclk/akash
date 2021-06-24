@@ -51,11 +51,11 @@ type Client interface {
 	LeaseLogs(ctx context.Context, id mtypes.LeaseID, services string, follow bool, tailLines int64) (*ServiceLogs, error)
 	ServiceStatus(ctx context.Context, id mtypes.LeaseID, service string) (*cltypes.ServiceStatus, error)
 	LeaseShell(ctx context.Context, id mtypes.LeaseID, service string, cmd []string,
-		stdin io.Reader,
+		stdin io.ReadCloser,
 		stdout io.Writer,
 		stderr io.Writer,
 		tty bool,
-		tsq remotecommand.TerminalSizeQueue) error
+		tsq <- chan remotecommand.TerminalSize) error
 }
 
 type LeaseKubeEvent struct {
@@ -372,11 +372,11 @@ func (c *client) LeaseStatus(ctx context.Context, id mtypes.LeaseID) (*cltypes.L
 }
 
 func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service string, cmd []string,
-	stdin io.Reader,
+	stdin io.ReadCloser,
 	stdout io.Writer,
 	stderr io.Writer,
 	tty bool,
-	tsq remotecommand.TerminalSizeQueue) error {
+	terminalResize <- chan remotecommand.TerminalSize) error {
 
 	endpoint, err := url.Parse(c.host.String() + "/" + leaseShellPath(lID))
 	if err != nil {
@@ -412,7 +412,6 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 
 	fmt.Printf("dialing %q\n", endpoint.String())
 
-	// TODO - need to wrap this with tty.Safe call on the terminal to restore the previous terminal settings
 	conn, response, err := c.wsclient.DialContext(ctx, endpoint.String(), nil)
 	if err != nil {
 		if errors.Is(err, websocket.ErrBadHandshake) {
@@ -427,95 +426,138 @@ func (c *client) LeaseShell(ctx context.Context, lID mtypes.LeaseID, service str
 		return err
 	}
 
-	_ = response
-
 	l := &sync.Mutex{}
+	subctx, subcancel := context.WithCancel(ctx)
+	wg := &sync.WaitGroup{}
 	if stdin != nil {
+		wg.Add(1)
 		go func (){
+			defer wg.Done()
 			data := make([]byte, 256)
 
-			writer := wsutil.NewWsWriterWrapper(conn, 104, l)
+			writer := wsutil.NewWsWriterWrapper(conn, LeaseShellCodeStdin, l)
 			for {
 				n, err := stdin.Read(data)
 				if err != nil {
+					// TODO - record error
 					return
 				}
 
 				_, err = writer.Write(data[0:n])
 				if err != nil {
-					fmt.Printf("failed writing stdin data: %v", err)
+					// TODO - record error
 					return
 				}
 			}
 		}()
 	}
 
-	if tty && tsq != nil {
+	if tty && terminalResize != nil {
+		wg.Add(1)
 		go func () {
-			for {
-				_ = tsq.Next()
-			}
-		}()
-
-		go func () {
+			defer wg.Done()
 			var w io.Writer
-			w = wsutil.NewWsWriterWrapper(conn, 105, l)
+			w = wsutil.NewWsWriterWrapper(conn, LeaseShellCodeTerminalResize, l)
 			buf := bytes.Buffer{}
 			for {
-				size := tsq.Next() // This waits for a value
-				if size == nil {
+				var size remotecommand.TerminalSize
+				var ok bool
+				select {
+				case <- subctx.Done():
 					return
+				case size, ok = <- terminalResize:
+					if !ok { // Channel has closed
+						return
+					}
+
 				}
+
 				// Clear the buffer, then pack in both values
 				(&buf).Reset()
 				err = binary.Write(&buf, binary.BigEndian, size.Width)
 				if err != nil {
+					// TODO - record error
 					return
 				}
 				err = binary.Write(&buf, binary.BigEndian, size.Height)
 				if err != nil {
+					// TODO - record error
 					return
 				}
 
 				_, err = w.Write((&buf).Bytes())
 				if err != nil {
-					fmt.Printf("failed encoding terminal size: %v", err)
+					// TODO - record error
 					return
 				}
 			}
 		}()
 	}
 
-	debug := false
+	var remoteError *bytes.Buffer
+	var connectionError error
+	loop:
 	for {
 		messageType, data, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
-
-		msgId := data[0]
-		if debug {
-			fmt.Fprintf(stderr,"Got message type: %d, id %d\n", messageType, msgId)
+		if messageType != websocket.BinaryMessage {
+			continue // Just ignore anything else
 		}
 
-		if msgId == 100 {
-			stdout.Write(data[1:])
+		if len(data) == 0 {
+			connectionError = errors.New("provider sent a message that is too short to parse")
 		}
 
-		if msgId == 101 {
-			stderr.Write(data[1:])
+		msgId := data[0] // First byte is always message ID
+		msg := data[1:] // remainder is the message
+		switch msgId {
+		case LeaseShellCodeStdout:
+			stdout.Write(msg) // TODO - check error
+		case LeaseShellCodeStderr:
+			stderr.Write(msg) // TODO - check error
+		case LeaseShellCodeResult:
+			remoteError = bytes.NewBuffer(msg)
+			break loop
+		case LeaseShellCodeFailure:
+			connectionError = errors.New("the provider encountered an unknown error")
+			break loop
+		default:
+			connectionError = fmt.Errorf("provider sent unknown message ID %d", messageType)
+			break loop
 		}
 
-		if debug {
-			io.WriteString(stderr, "\n---\n")
-		}
-
-		if msgId == 102 || msgId == 103 {
-			break
-		}
 	}
 
-	return nil
+	subcancel()
+
+	if stdin != nil {
+		stdin.Close() // TODO - check if this actually works
+	}
+
+	if remoteError != nil {
+		dec := json.NewDecoder(remoteError)
+		var v leaseShellResponse
+		err := dec.Decode(&v)
+		if err != nil {
+			return fmt.Errorf("%w: failed parsing response data from provider", err)
+		}
+
+		if 0 != len(v.Message) {
+			return errors.New(v.Message)
+		}
+
+		if 0 != v.ExitCode {
+			return fmt.Errorf("remote process exited with code %d", v.ExitCode)
+		}
+
+	}
+
+	// TODO - re enable me after fixing the goroutine reading from stdin
+	//wg.Wait()
+
+	return connectionError
 }
 
 func (c *client) LeaseEvents(ctx context.Context, id mtypes.LeaseID, _ string, follow bool) (*LeaseKubeEvents, error) {

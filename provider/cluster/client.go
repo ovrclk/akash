@@ -52,14 +52,15 @@ type ExecResult interface {
 	ExitCode() int
 }
 
-var ErrExecNoServiceWithName = errors.New("No such service exists with that name")
-var ErrExecServiceNotRunning = errors.New("Service with that name is not running")
-var ErrCommandExecutionFailed = errors.New("Command execution failed")
-var ErrCommandDoesNotExist = errors.New("The command could not be executed because it does not exist")
+var ErrExecNoServiceWithName = errors.New("no such service exists with that name")
+var ErrExecServiceNotRunning = errors.New("service with that name is not running")
+var ErrCommandExecutionFailed = errors.New("command execution failed")
+var ErrCommandDoesNotExist = errors.New("command could not be executed because it does not exist")
+var ErrDeploymentNotYetRunning = errors.New("deployment is not yet active")
 
 func ErrorIsOkToSendToClient(err error) bool {
 	return errors.Is(err, ErrExecNoServiceWithName) || errors.Is(err, ErrExecServiceNotRunning) ||
-		errors.Is(err, ErrCommandExecutionFailed) || errors.Is(err, ErrCommandDoesNotExist)
+		errors.Is(err, ErrCommandExecutionFailed) || errors.Is(err, ErrCommandDoesNotExist) || errors.Is(err, ErrDeploymentNotYetRunning)
 }
 
 type node struct {
