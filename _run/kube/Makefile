@@ -40,3 +40,6 @@ provider-service-status:
 .PHONY: provider-lease-ping
 provider-lease-ping:
 	curl -sIH "Host: hello.localhost" localhost:$(KIND_HTTP_PORT)
+
+.PHONY: clean-$(AKASH_RUN_NAME)
+clean-$(AKASH_RUN_NAME):

@@ -5,12 +5,13 @@ package kube
 import (
 	"context"
 
-	akashv1 "github.com/ovrclk/akash/pkg/client/clientset/versioned"
-	metricsutils "github.com/ovrclk/akash/util/metrics"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	akashv1 "github.com/ovrclk/akash/pkg/client/clientset/versioned"
+	metricsutils "github.com/ovrclk/akash/util/metrics"
 )
 
 func applyNS(ctx context.Context, kc kubernetes.Interface, b *nsBuilder) error {
@@ -101,6 +102,29 @@ func applyDeployment(ctx context.Context, kc kubernetes.Interface, b *deployment
 		obj, err = b.create()
 		if err == nil {
 			_, err = kc.AppsV1().Deployments(b.ns()).Create(ctx, obj, metav1.CreateOptions{})
+			metricsutils.IncCounterVecWithLabelValues(kubeCallsCounter, "deployments-create", err)
+		}
+	}
+	return err
+}
+
+func applyStatefulSet(ctx context.Context, kc kubernetes.Interface, b *statefulSetBuilder) error {
+	obj, err := kc.AppsV1().StatefulSets(b.ns()).Get(ctx, b.name(), metav1.GetOptions{})
+	metricsutils.IncCounterVecWithLabelValuesFiltered(kubeCallsCounter, "deployments-get", err, errors.IsNotFound)
+
+	switch {
+	case err == nil:
+		obj, err = b.update(obj)
+
+		if err == nil {
+			_, err = kc.AppsV1().StatefulSets(b.ns()).Update(ctx, obj, metav1.UpdateOptions{})
+			metricsutils.IncCounterVecWithLabelValues(kubeCallsCounter, "deployments-update", err)
+
+		}
+	case errors.IsNotFound(err):
+		obj, err = b.create()
+		if err == nil {
+			_, err = kc.AppsV1().StatefulSets(b.ns()).Create(ctx, obj, metav1.CreateOptions{})
 			metricsutils.IncCounterVecWithLabelValues(kubeCallsCounter, "deployments-create", err)
 		}
 	}

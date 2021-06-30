@@ -6,10 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"k8s.io/client-go/tools/remotecommand"
 	"math/rand"
 	"sync"
 	"time"
+
+	"k8s.io/client-go/tools/remotecommand"
 
 	eventsv1 "k8s.io/api/events/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,12 +70,12 @@ func ErrorIsOkToSendToClient(err error) bool {
 
 type node struct {
 	id                    string
-	availableResources    atypes.ResourceUnits
-	allocateableResources atypes.ResourceUnits
+	availableResources    ctypes.ResourceUnits
+	allocateableResources ctypes.ResourceUnits
 }
 
 // NewNode returns new Node instance with provided details
-func NewNode(id string, allocateable atypes.ResourceUnits, available atypes.ResourceUnits) ctypes.Node {
+func NewNode(id string, allocateable ctypes.ResourceUnits, available ctypes.ResourceUnits) ctypes.Node {
 	return &node{id: id, allocateableResources: allocateable, availableResources: available}
 }
 
@@ -88,11 +89,11 @@ func (n *node) Reserve(atypes.ResourceUnits) error {
 }
 
 // Available returns available units of node
-func (n *node) Available() atypes.ResourceUnits {
+func (n *node) Available() ctypes.ResourceUnits {
 	return n.availableResources
 }
 
-func (n *node) Allocateable() atypes.ResourceUnits {
+func (n *node) Allocateable() ctypes.ResourceUnits {
 	return n.allocateableResources
 }
 
@@ -254,27 +255,27 @@ func (c *nullClient) Deployments(context.Context) ([]ctypes.Deployment, error) {
 
 func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 	return []ctypes.Node{
-		NewNode("solo", atypes.ResourceUnits{
+		NewNode("solo", ctypes.ResourceUnits{
 			CPU: &atypes.CPU{
 				Units: atypes.NewResourceValue(nullClientCPU),
 			},
 			Memory: &atypes.Memory{
 				Quantity: atypes.NewResourceValue(nullClientMemory),
 			},
-			Storage: &atypes.Storage{
-				Quantity: atypes.NewResourceValue(nullClientStorage),
-			},
+			// Storage: &atypes.Storage{
+			// 	Quantity: atypes.NewResourceValue(nullClientStorage),
+			// },
 		},
-			atypes.ResourceUnits{
+			ctypes.ResourceUnits{
 				CPU: &atypes.CPU{
 					Units: atypes.NewResourceValue(nullClientCPU),
 				},
 				Memory: &atypes.Memory{
 					Quantity: atypes.NewResourceValue(nullClientMemory),
 				},
-				Storage: &atypes.Storage{
-					Quantity: atypes.NewResourceValue(nullClientStorage),
-				},
+				// Storage: &atypes.Storage{
+				// 	Quantity: atypes.NewResourceValue(nullClientStorage),
+				// },
 			}),
 	}, nil
 }

@@ -3,6 +3,8 @@ package types
 import (
 	"reflect"
 	"regexp"
+	"strconv"
+	"strings"
 
 	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"gopkg.in/yaml.v3"
@@ -10,7 +12,7 @@ import (
 
 const (
 	moduleName                = "akash"
-	attributeNameRegexpString = `^[a-zA-Z][\w-]{1,30}[a-zA-Z0-9]$`
+	attributeNameRegexpString = `^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z](?:[a-z0-9]{0,61}[a-z0-9])?)?$`
 )
 
 const (
@@ -35,7 +37,36 @@ At this moment type though is same as sdk.Attributes but all akash libraries wer
 turned to use a new one
 */
 type Attributes []Attribute
-type AttributeValue string
+
+type AttributeValue interface {
+	AsBool() (bool, bool)
+	AsString() (string, bool)
+}
+
+type attributeValue struct {
+	value string
+}
+
+func (val attributeValue) AsBool() (bool, bool) {
+	if val.value == "" {
+		return false, false
+	}
+
+	res, err := strconv.ParseBool(val.value)
+	if err != nil {
+		return false, false
+	}
+
+	return res, true
+}
+
+func (val attributeValue) AsString() (string, bool) {
+	if val.value == "" {
+		return "", false
+	}
+
+	return val.value, true
+}
 
 func NewStringAttribute(key, val string) Attribute {
 	return Attribute{
@@ -77,6 +108,19 @@ func (attr Attributes) Validate() error {
 	}
 
 	return nil
+}
+
+func (attr Attributes) Dup() Attributes {
+	res := make(Attributes, len(attr))
+
+	for _, pair := range attr {
+		res = append(res, Attribute{
+			Key:   pair.Key,
+			Value: pair.Value,
+		})
+	}
+
+	return res
 }
 
 /*
@@ -133,4 +177,76 @@ loop:
 
 func (attr Attributes) SubsetOf(that Attributes) bool {
 	return AttributesSubsetOf(attr, that)
+}
+
+// helpers below are rather PoC
+
+func (attr Attributes) Find(glob string) AttributeValue {
+	// todo wildcard
+
+	var val attributeValue
+
+	for i := range attr {
+		if glob == attr[i].Key {
+			val.value = attr[i].Value
+			break
+		}
+	}
+
+	return val
+}
+
+func (attr Attributes) Iterate(prefix string, fn func(group, key, value string)) {
+	for _, item := range attr {
+		if strings.HasPrefix(item.Key, prefix) {
+			tokens := strings.SplitAfter(item.Key, "/")
+			tokens = tokens[1:]
+			fn(tokens[1], tokens[2], item.Value)
+		}
+	}
+}
+
+// FilterGroupsByPrefix it just to demo the thing. Needs work
+//
+// example
+// storage/1/persistent: true
+// storage/1/class: nvme
+// storage/2/persistent: false
+//
+// returns
+// - - persistent: true
+//     class: nvme
+// - - persistent: false
+func (attr Attributes) FilterGroupsByPrefix(prefix string) []Attributes {
+	var res []Attributes
+
+	groups := make(map[string]Attributes)
+
+	for _, item := range attr {
+		if !strings.HasPrefix(item.Key, prefix) {
+			continue
+		}
+
+		tokens := strings.SplitAfter(item.Key, "/")
+		// filter out prefix name
+		tokens = tokens[1:]
+
+		group := groups[tokens[0]]
+		if group == nil {
+			group = Attributes{}
+		}
+
+		group = append(group, Attribute{
+			Key:   tokens[1],
+			Value: item.Value,
+		})
+
+		groups[tokens[0]] = group
+	}
+
+	for _, group := range groups {
+		res = append(res, group)
+	}
+
+	return res
 }

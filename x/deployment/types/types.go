@@ -143,7 +143,7 @@ func (g Group) ValidatePausable() error {
 	}
 }
 
-// ValidatePausable provides error response if group is not pausable
+// ValidateStartable provides error response if group is not pausable
 func (g Group) ValidateStartable() error {
 	switch g.State {
 	case GroupClosed:
