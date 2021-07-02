@@ -3,6 +3,8 @@ package cluster
 import (
 	"bufio"
 	"context"
+	"errors"
+	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"io"
 	"math/rand"
 	"sync"
@@ -19,7 +21,10 @@ import (
 	mtypes "github.com/ovrclk/akash/x/market/types"
 )
 
-var _ Client = (*nullClient)(nil)
+var (
+	_                         Client = (*nullClient)(nil)
+	ErrClearHostnameNoMatches        = errors.New("clearing hostname, no matches")
+)
 
 type ReadClient interface {
 	LeaseStatus(context.Context, mtypes.LeaseID) (*ctypes.LeaseStatus, error)
@@ -31,10 +36,11 @@ type ReadClient interface {
 // Client interface lease and deployment methods
 type Client interface {
 	ReadClient
-	Deploy(context.Context, mtypes.LeaseID, *manifest.Group) error
+	Deploy(ctx context.Context, lID mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error
 	TeardownLease(context.Context, mtypes.LeaseID) error
 	Deployments(context.Context) ([]ctypes.Deployment, error)
 	Inventory(context.Context) ([]ctypes.Node, error)
+	ClearHostname(ctx context.Context, ownerAddress cosmostypes.Address, dseq uint64, hostname string) error
 }
 
 type node struct {
@@ -101,7 +107,7 @@ func NullClient() Client {
 	}
 }
 
-func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group) error {
+func (c *nullClient) Deploy(ctx context.Context, lid mtypes.LeaseID, mgroup *manifest.Group, holdHostnames []string) error {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 
@@ -247,4 +253,8 @@ func (c *nullClient) Inventory(context.Context) ([]ctypes.Node, error) {
 				},
 			}),
 	}, nil
+}
+
+func (c *nullClient) ClearHostname(ctx context.Context, ownerAddress cosmostypes.Address, dseq uint64, hostname string) error {
+	return nil
 }
