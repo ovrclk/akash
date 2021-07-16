@@ -121,29 +121,31 @@ func (sdl *v2) DeploymentGroups() ([]*dtypes.GroupSpec, error) {
 
 			endpoints := make([]types.Endpoint, 0)
 			for _, expose := range sdl.Services[svcName].Expose {
+
+				proto, err := manifest.ParseServiceProtocol(expose.Proto)
+				if err != nil {
+					return nil, err
+				}
+				// This value is created just so it can be passed to the utility function
+				v := manifest.ServiceExpose{
+					Port:         expose.Port,
+					ExternalPort: expose.As,
+					Proto:        proto,
+					Global:       false,
+					Hosts:        expose.Accept.Items,
+				}
+
 				for _, to := range expose.To {
-					if to.Global {
-						proto, err := manifest.ParseServiceProtocol(expose.Proto)
-						if err != nil {
-							return nil, err
-						}
-						// This value is created just so it can be passed to the utility function
-						v := manifest.ServiceExpose{
-							Port:         expose.Port,
-							ExternalPort: expose.As,
-							Proto:        proto,
-							Service:      to.Service,
-							Global:       to.Global,
-							Hosts:        expose.Accept.Items,
-						}
-
-						kind := types.Endpoint_RANDOM_PORT
-						if providerUtil.ShouldBeIngress(v) {
-							kind = types.Endpoint_SHARED_HTTP
-						}
-
-						endpoints = append(endpoints, types.Endpoint{Kind: kind})
+					v.Global = v.Global || to.Global
+				}
+				
+				if v.Global {
+					kind := types.Endpoint_RANDOM_PORT
+					if providerUtil.ShouldBeIngress(v) {
+						kind = types.Endpoint_SHARED_HTTP
 					}
+
+					endpoints = append(endpoints, types.Endpoint{Kind: kind})
 				}
 			}
 
@@ -169,6 +171,7 @@ func (sdl *v2) DeploymentGroups() ([]*dtypes.GroupSpec, error) {
 
 func (sdl *v2) Manifest() (manifest.Manifest, error) {
 	groups := make(map[string]*manifest.Group)
+	servicesInGroup := make(map[string]map[string]struct{})
 
 	for _, svcName := range v2DeploymentSvcNames(sdl.Deployments) {
 		depl := sdl.Deployments[svcName]
@@ -184,6 +187,13 @@ func (sdl *v2) Manifest() (manifest.Manifest, error) {
 				}
 				groups[group.Name] = group
 			}
+
+			services := servicesInGroup[group.Name]
+			if services == nil {
+				services = make(map[string]struct{})
+			}
+			services[svcName] = struct{}{}
+			servicesInGroup[group.Name] = services
 
 			compute, ok := sdl.Profiles.Compute[svcdepl.Profile]
 			if !ok {
@@ -210,36 +220,24 @@ func (sdl *v2) Manifest() (manifest.Manifest, error) {
 					return manifest.Manifest{}, err
 				}
 
-				if len(expose.To) != 0 {
-					for _, to := range expose.To {
-						msvc.Expose = append(msvc.Expose, manifest.ServiceExpose{
-							Service:      to.Service,
-							Port:         expose.Port,
-							ExternalPort: expose.As,
-							Proto:        proto,
-							Global:       to.Global,
-							Hosts:        expose.Accept.Items,
-						})
-					}
-				} else { // Nothing explicitly set, fill in without any information from "expose.To"
-					msvc.Expose = append(msvc.Expose, manifest.ServiceExpose{
-						Service:      "",
-						Port:         expose.Port,
-						ExternalPort: expose.As,
-						Proto:        proto,
-						Global:       false,
-						Hosts:        expose.Accept.Items,
-					})
+				serviceExpose := manifest.ServiceExpose{
+					Port:         expose.Port,
+					ExternalPort: expose.As,
+					Proto:        proto,
+					Global:       false,
+					Hosts:        expose.Accept.Items,
 				}
+
+				for _, to := range expose.To {
+					serviceExpose.Global = serviceExpose.Global || to.Global
+				}
+
+				msvc.Expose = append(msvc.Expose, serviceExpose)
 			}
 
 			// stable ordering
 			sort.Slice(msvc.Expose, func(i, j int) bool {
 				a, b := msvc.Expose[i], msvc.Expose[j]
-
-				if a.Service != b.Service {
-					return a.Service < b.Service
-				}
 
 				if a.Port != b.Port {
 					return a.Port < b.Port
@@ -258,6 +256,31 @@ func (sdl *v2) Manifest() (manifest.Manifest, error) {
 
 			group.Services = append(group.Services, *msvc)
 
+		}
+	}
+
+	for _, svcName := range v2DeploymentSvcNames(sdl.Deployments) {
+		depl := sdl.Deployments[svcName]
+
+		for _, groupName := range v2DeploymentPlacementNames(depl) {
+			services := servicesInGroup[groupName]
+			svc, ok := sdl.Services[svcName]
+			if !ok {
+				return nil, errors.Errorf("%v.%v: no service profile named %v", svcName, groupName, svcName)
+			}
+
+			for _, expose := range svc.Expose {
+
+				for _, dst := range expose.To {
+					if 0 == len(dst.Service) {
+						continue
+					}
+					_, exists := services[dst.Service]
+					if !exists {
+						return nil, errors.Errorf("%v.%v: cannot expose to %q, no service by that name in this deployment group", svcName, groupName, dst.Service)
+					}
+				}
+			}
 		}
 	}
 
