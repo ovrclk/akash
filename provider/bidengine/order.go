@@ -3,14 +3,18 @@ package bidengine
 import (
 	"context"
 	"fmt"
-	atypes "github.com/ovrclk/akash/x/audit/types"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"regexp"
 	"time"
 
-	lifecycle "github.com/boz/go-lifecycle"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	atypes "github.com/ovrclk/akash/x/audit/types"
+
+	"github.com/boz/go-lifecycle"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/tendermint/tendermint/libs/log"
+
 	"github.com/ovrclk/akash/provider/cluster"
 	ctypes "github.com/ovrclk/akash/provider/cluster/types"
 	"github.com/ovrclk/akash/provider/event"
@@ -20,7 +24,6 @@ import (
 	"github.com/ovrclk/akash/util/runner"
 	dtypes "github.com/ovrclk/akash/x/deployment/types"
 	mtypes "github.com/ovrclk/akash/x/market/types"
-	"github.com/tendermint/tendermint/libs/log"
 )
 
 // order manages bidding and general lifecycle handling of an order.
@@ -401,7 +404,6 @@ loop:
 }
 
 func (o *order) shouldBid(group *dtypes.Group) (bool, error) {
-
 	// does provider have required attributes?
 	if !group.GroupSpec.MatchAttributes(o.session.Provider().Attributes) {
 		o.log.Debug("unable to fulfill: incompatible attributes")

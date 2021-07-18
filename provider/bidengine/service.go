@@ -253,5 +253,4 @@ func queryExistingOrders(ctx context.Context, session session.Session) ([]mtypes
 	}
 
 	return existingOrders, nil
-
 }

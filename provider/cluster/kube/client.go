@@ -3,11 +3,14 @@ package kube
 import (
 	"context"
 	"fmt"
-	metricsutils "github.com/ovrclk/akash/util/metrics"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 	"os"
 	"path"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/ovrclk/akash/types"
+	metricsutils "github.com/ovrclk/akash/util/metrics"
 
 	"k8s.io/client-go/util/flowcontrol"
 
@@ -31,12 +34,12 @@ import (
 
 	"github.com/tendermint/tendermint/libs/log"
 
+	"k8s.io/client-go/tools/pager"
+
 	"github.com/ovrclk/akash/manifest"
 	akashclient "github.com/ovrclk/akash/pkg/client/clientset/versioned"
 	"github.com/ovrclk/akash/provider/cluster"
-	"github.com/ovrclk/akash/types"
 	mtypes "github.com/ovrclk/akash/x/market/types"
-	"k8s.io/client-go/tools/pager"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	restclient "k8s.io/client-go/rest"
@@ -187,9 +190,25 @@ func (c *client) Deploy(ctx context.Context, lid mtypes.LeaseID, group *manifest
 
 	for svcIdx := range group.Services {
 		service := &group.Services[svcIdx]
-		if err := applyDeployment(ctx, c.kc, newDeploymentBuilder(c.log, c.settings, lid, group, service)); err != nil {
-			c.log.Error("applying deployment", "err", err, "lease", lid, "service", service.Name)
-			return err
+
+		persistent := false
+		for i := range service.Resources.Storage {
+			attrVal := service.Resources.Storage[i].Attributes.Find(StorageAttributePersistent)
+			if persistent, _ = attrVal.AsBool(); persistent {
+				break
+			}
+		}
+
+		if persistent {
+			if err := applyStatefulSet(ctx, c.kc, newStatefulSetBuilder(c.log, c.settings, lid, group, service)); err != nil {
+				c.log.Error("applying statefulSet", "err", err, "lease", lid, "service", service.Name)
+				return err
+			}
+		} else {
+			if err := applyDeployment(ctx, c.kc, newDeploymentBuilder(c.log, c.settings, lid, group, service)); err != nil {
+				c.log.Error("applying deployment", "err", err, "lease", lid, "service", service.Name)
+				return err
+			}
 		}
 
 		if len(service.Expose) == 0 {
@@ -617,8 +636,7 @@ func (c *client) Inventory(ctx context.Context) ([]ctypes.Node, error) {
 
 	nodes := make([]ctypes.Node, 0, len(knodes))
 	// Iterate over the node metrics
-	for nodeName, knode := range knodes {
-
+	for _, knode := range knodes {
 		// Get the amount of available CPU, then subtract that in use
 		var tmp resource.Quantity
 
@@ -628,8 +646,8 @@ func (c *client) Inventory(ctx context.Context) ([]ctypes.Node, error) {
 		tmp = knode.memory.allocatable
 		memoryTotal := (&tmp).Value()
 
-		tmp = knode.storage.allocatable
-		storageTotal := (&tmp).Value()
+		// tmp = knode.ephemeralStorage.allocatable
+		// ephemeralStorageTotal := (&tmp).Value()
 
 		tmp = knode.cpu.available()
 		cpuAvailable := (&tmp).MilliValue()
@@ -643,7 +661,7 @@ func (c *client) Inventory(ctx context.Context) ([]ctypes.Node, error) {
 			memoryAvailable = 0
 		}
 
-		tmp = knode.storage.available()
+		tmp = knode.ephemeralStorage.available()
 		storageAvailable := (&tmp).Value()
 		if storageAvailable < 0 {
 			storageAvailable = 0
@@ -664,34 +682,34 @@ func (c *client) Inventory(ctx context.Context) ([]ctypes.Node, error) {
 				Quantity: types.NewResourceValue(uint64(memoryAvailable)),
 				// todo (#788) memory attributes ?
 			},
-			Storage: &types.Storage{
-				Quantity: types.NewResourceValue(uint64(storageAvailable)),
-				// todo (#788) storage attributes like class and iops?
-			},
+			// Storage: &types.Storage{
+			// 	Quantity: types.NewResourceValue(uint64(storageAvailable)),
+			// 	// todo (#788) storage attributes like class and iops?
+			// },
 		}
 
-		allocateable := types.ResourceUnits{
-			CPU: &types.CPU{
-				Units: types.NewResourceValue(uint64(cpuTotal)),
-				Attributes: []types.Attribute{
-					{
-						Key:   "arch",
-						Value: knode.arch,
-					},
-					// todo (#788) other node attributes ?
-				},
-			},
-			Memory: &types.Memory{
-				Quantity: types.NewResourceValue(uint64(memoryTotal)),
-				// todo (#788) memory attributes ?
-			},
-			Storage: &types.Storage{
-				Quantity: types.NewResourceValue(uint64(storageTotal)),
-				// todo (#788) storage attributes like class and iops?
-			},
-		}
+		// allocateable := types.ResourceUnits{
+		// 	CPU: &types.CPU{
+		// 		Units: types.NewResourceValue(uint64(cpuTotal)),
+		// 		Attributes: []types.Attribute{
+		// 			{
+		// 				Key:   "arch",
+		// 				Value: knode.arch,
+		// 			},
+		// 			todo (#788) other node attributes ?
+		// },
+		// },
+		// Memory: &types.Memory{
+		// 	Quantity: types.NewResourceValue(uint64(memoryTotal)),
+		// 	todo (#788) memory attributes ?
+		// },
+		// 	// Storage: &types.Storage{
+		// 	// 	Quantity: types.NewResourceValue(uint64(storageTotal)),
+		// 	// 	// todo (#788) storage attributes like class and iops?
+		// 	},
+		// }
 
-		nodes = append(nodes, cluster.NewNode(nodeName, allocateable, resources))
+		// nodes = append(nodes, cluster.NewNode(nodeName, allocateable, resources))
 	}
 
 	return nodes, nil
@@ -710,10 +728,11 @@ func (rp resourcePair) available() resource.Quantity {
 }
 
 type nodeResources struct {
-	cpu     resourcePair
-	memory  resourcePair
-	storage resourcePair
-	arch    string
+	cpu              resourcePair
+	memory           resourcePair
+	ephemeralStorage resourcePair
+	storage          resourcePair
+	arch             string
 }
 
 func (c *client) activeNodes(ctx context.Context) (map[string]nodeResources, error) {
@@ -738,7 +757,6 @@ func (c *client) activeNodes(ctx context.Context) (map[string]nodeResources, err
 
 	retnodes := make(map[string]nodeResources)
 	for _, knode := range knodes.Items {
-
 		if !c.nodeIsActive(knode) {
 			continue
 		}
@@ -775,27 +793,38 @@ func (c *client) activeNodes(ctx context.Context) (map[string]nodeResources, err
 		nodeName := pod.Spec.NodeName
 
 		entry := retnodes[nodeName]
-		cpuAllocated := &entry.cpu.allocated
-		memoryAllocated := &entry.memory.allocated
-		storageAllocated := &entry.storage.allocated
-		for _, container := range pod.Spec.Containers {
-			// Per the documentation Limits > Requests for each pod. But stuff in the kube-system
-			// namespace doesn't follow this. The requests is always summed here since it is what
-			// the cluster considers a dedicated resource
 
-			cpuAllocated.Add(*container.Resources.Requests.Cpu())
-			memoryAllocated.Add(*container.Resources.Requests.Memory())
-			storageAllocated.Add(*container.Resources.Requests.StorageEphemeral())
+		for _, container := range pod.Spec.Containers {
+			entry.addAllocatedResources(container.Resources.Requests)
 		}
+
+		// Add overhead for running a pod to the sum of requests
+		entry.addAllocatedResources(pod.Spec.Overhead)
 
 		retnodes[nodeName] = entry // Map is by value, so store the copy back into the map
 		return nil
 	})
+
 	if err != nil {
 		return nil, err
 	}
 
 	return retnodes, nil
+}
+
+func (nr *nodeResources) addAllocatedResources(rl corev1.ResourceList) {
+	for name, quantity := range rl {
+		switch name {
+		case corev1.ResourceCPU:
+			nr.cpu.allocated.Add(quantity)
+		case corev1.ResourceMemory:
+			nr.memory.allocated.Add(quantity)
+		case corev1.ResourceEphemeralStorage:
+			nr.ephemeralStorage.allocated.Add(quantity)
+		case corev1.ResourceStorage:
+			nr.storage.allocated.Add(quantity)
+		}
+	}
 }
 
 func (c *client) nodeIsActive(node corev1.Node) bool {

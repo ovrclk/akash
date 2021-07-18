@@ -68,8 +68,10 @@ spec:
                                 type: string
                                 format: uint64
                               storage:
-                                type: string
-                                format: uint64
+                                type: array
+                                items:
+                                  type: string
+                                  format: uint64
                           count:
                             type: number
                             format: uint64
